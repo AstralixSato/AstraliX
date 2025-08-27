@@ -8,6 +8,7 @@ import os
 import ecdsa
 import binascii
 import requests
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
 """
 AstraliX Blockchain and ALX Token (Testnet Ready)
@@ -20,8 +21,8 @@ AstraliX Blockchain and ALX Token (Testnet Ready)
   - Wallet addresses with 'ALX' prefix.
   - Support for smart contracts (basic storage).
   - Persistence in astralix_data.json.
-  - P2P networking with external connections and sync.
-- Run with: python astralix10.py
+  - P2P networking with HTTP endpoint for chain sync to Heroku seed node.
+- Run with: python astralix100.py
 """
 
 class Transaction:
@@ -29,7 +30,7 @@ class Transaction:
         # Initialize a transaction with sender, receiver, amount, type, data, and optional signature
         self.sender = sender
         self.receiver = receiver
-        self.amount = float(amount)  # Ensure amount is float for JSON consistency
+        self.amount = float(amount)
         self.tx_type = tx_type
         self.data = data
         self.timestamp = time.time()
@@ -120,7 +121,7 @@ class AstraliX:
         self.chain = []
         self.pending_transactions = []
         self.data_file = "astralix_data.json"
-        self.seed_nodes = [("127.0.0.1", 5000)]  # Replace with real seed node IPs/ports
+        self.seed_nodes = [("astralix-87c3a03ccde8.herokuapp.com", int(os.getenv("PORT", 5000)))]  # Heroku seed node
         self.load_data()
         if not self.chain or not self.is_chain_valid():
             print("Invalid chain or no chain found, creating new genesis block")
@@ -185,10 +186,10 @@ class AstraliX:
             print("No data file found, starting with empty chain")
 
     def sync_chain(self):
-        # Sync chain from a seed node
+        # Sync chain from the Heroku seed node
         for host, port in self.seed_nodes:
             try:
-                response = requests.get(f"http://{host}:{port}/get_chain", timeout=5)
+                response = requests.get(f"http://{host}:{port}/get_chain", timeout=10)
                 if response.status_code == 200:
                     data = response.json()
                     self.chain = []
@@ -425,38 +426,11 @@ class AstraliX:
                 print(f"Failed to broadcast to {peer}: {e}")
 
     def listen_for_blocks(self, host='0.0.0.0', port=int(os.getenv("PORT", 5000))):
-        # Listen for incoming blocks from peers
+        # Listen for incoming blocks and chain requests via HTTP
         try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            s.bind((host, port))
-            s.listen(5)
+            server = HTTPServer((host, port), lambda *args, **kwargs: AstraliXRequestHandler(self, *args, **kwargs))
             print(f"Listening for blocks on {host}:{port}")
-            while True:
-                conn, addr = s.accept()
-                data = conn.recv(1024)
-                if data:
-                    try:
-                        block_data = json.loads(data.decode())
-                        transactions = [Transaction(tx["sender"], tx["receiver"], float(tx["amount"]), 
-                                                   tx.get("tx_type", "normal"), tx.get("data"), tx.get("signature")) 
-                                        for tx in block_data["transactions"]]
-                        new_block = Block(block_data["index"], block_data["previous_hash"], 
-                                          block_data["timestamp"], transactions, block_data["validator"])
-                        new_block.hash = block_data["hash"]
-                        reward = self.get_current_block_reward()
-                        if self.update_balances(transactions, block_data["validator"], reward):
-                            self.chain.append(new_block)
-                            if self.is_chain_valid():
-                                print(f"Block received from {addr}: {block_data['hash']}")
-                                self.save_data()
-                            else:
-                                print(f"Invalid chain after receiving block from {addr}")
-                                self.chain.pop()
-                        else:
-                            print(f"Invalid block from {addr}")
-                    except Exception as e:
-                        print(f"Error processing block from {addr}: {e}")
-                conn.close()
+            server.serve_forever()
         except Exception as e:
             print(f"Error starting listener: {e}")
 
@@ -659,11 +633,36 @@ class AstraliX:
             else:
                 print("Invalid choice, please try again")
 
+class AstraliXRequestHandler(BaseHTTPRequestHandler):
+    def __init__(self, astralix, *args, **kwargs):
+        # Initialize HTTP handler with reference to AstraliX instance
+        self.astralix = astralix
+        super().__init__(*args, **kwargs)
+
+    def do_GET(self):
+        # Handle GET requests for chain data
+        if self.path == "/get_chain":
+            self.send_response(200)
+            self.send_header("Content-type", "application/json")
+            self.end_headers()
+            data = {
+                "chain": [block.to_dict() for block in self.astralix.chain],
+                "balances": self.astralix.balances,
+                "stakers": self.astralix.stakers,
+                "public_keys": self.astralix.public_keys,
+                "contract_states": self.astralix.contract_states,
+                "current_supply": self.astralix.current_supply
+            }
+            self.wfile.write(json.dumps(data).encode())
+        else:
+            self.send_response(404)
+            self.end_headers()
+
 # Create AstraliX blockchain
 astralix = AstraliX(max_supply=100_000_000, initial_supply=10_000_000, initial_block_reward=10, halving_interval=500_000)
 
 # Start listener in background
 threading.Thread(target=astralix.listen_for_blocks, args=('0.0.0.0', int(os.getenv("PORT", 5000)))).start()
 
-# Run the text-based interface (no initial transactions to avoid corruption)
+# Run the text-based interface
 astralix.run_interface()
