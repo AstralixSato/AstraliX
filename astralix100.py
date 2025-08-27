@@ -126,19 +126,19 @@ class AstraliX:
         if not self.chain or not self.is_chain_valid():
             print("Invalid chain or no chain found, creating new genesis block")
             self.chain = [self.create_genesis_block()]
-            self.balances = {}
+            self.balances = {"genesis_miner": float(initial_supply)}
             self.stakers = {}
             self.public_keys = {}
             self.contract_states = {}
             self.current_supply = float(initial_supply)
-            self.balances["genesis_miner"] = float(initial_supply)
             self.save_data()
         print(f"Blockchain initialized. Current supply: {self.current_supply} ALX")
 
     def create_genesis_block(self):
         # Create first block with initial supply distribution
         genesis_tx = Transaction("system", "genesis_miner", self.current_supply, tx_type="normal")
-        genesis = Block(0, "0", time.time(), [genesis_tx], "genesis_miner")
+        genesis = Block(0, "0", 1756276414.6047966, [genesis_tx], "genesis_miner")  # Fixed timestamp for consistency
+        genesis.hash = "2ce949be2a9eb8cd69b61823043e49c5bfc4379c9a7613b004198d04aa681c45"  # Fixed hash
         return genesis
 
     def save_data(self):
@@ -189,7 +189,6 @@ class AstraliX:
         # Sync chain from the Heroku seed node using HTTPS
         for host, port in self.seed_nodes:
             try:
-                # Use HTTPS and ignore port for Heroku
                 url = f"https://{host}/get_chain"
                 print(f"Attempting to sync with {url}")
                 response = requests.get(url, timeout=30)
@@ -429,7 +428,7 @@ class AstraliX:
                 if response.status_code == 200:
                     print(f"Block sent successfully to {host}")
                 else:
-                    print(f"Failed to send block to {host}: HTTP {response.status_code}")
+                    print(f"Failed to send block to {host}: HTTP {response.status_code}, Response: {response.text}")
             except requests.exceptions.RequestException as e:
                 print(f"Failed to send block to {host}: {e}")
 
@@ -663,9 +662,11 @@ class AstraliXRequestHandler(BaseHTTPRequestHandler):
                 "current_supply": self.astralix.current_supply
             }
             self.wfile.write(json.dumps(data).encode())
+            print(f"Served chain data to {self.client_address}")
         else:
             self.send_response(404)
             self.end_headers()
+            print(f"Invalid GET request from {self.client_address}: {self.path}")
 
     def do_POST(self):
         # Handle POST requests for adding blocks
@@ -687,29 +688,41 @@ class AstraliXRequestHandler(BaseHTTPRequestHandler):
                 )
                 new_block.hash = block_data["hash"]
                 # Validate block
-                if new_block.index == len(self.astralix.chain) and new_block.previous_hash == self.astralix.get_latest_block().hash:
-                    if self.astralix.update_balances(transactions, new_block.validator, self.astralix.get_current_block_reward()):
-                        self.astralix.chain.append(new_block)
-                        self.astralix.pending_transactions = []
-                        self.astralix.save_data()
-                        print(f"Block {new_block.index} added from peer")
-                        self.send_response(200)
-                        self.send_header("Content-type", "application/json")
-                        self.end_headers()
-                        self.wfile.write(json.dumps({"status": "success"}).encode())
-                    else:
-                        print(f"Block {new_block.index} rejected: Invalid transactions or reward")
-                        self.send_response(400)
-                        self.end_headers()
-                else:
-                    print(f"Block {new_block.index} rejected: Invalid index or previous hash")
+                print(f"Received block {new_block.index} from {self.client_address}, Previous hash: {new_block.previous_hash}, Expected: {self.astralix.get_latest_block().hash}")
+                if new_block.index != len(self.astralix.chain):
+                    print(f"Block {new_block.index} rejected: Invalid index (expected {len(self.astralix.chain)})")
                     self.send_response(400)
                     self.end_headers()
+                    return
+                if new_block.previous_hash != self.astralix.get_latest_block().hash:
+                    print(f"Block {new_block.index} rejected: Previous hash mismatch (received {new_block.previous_hash}, expected {self.astralix.get_latest_block().hash})")
+                    self.send_response(400)
+                    self.end_headers()
+                    return
+                if new_block.hash != new_block.calculate_hash():
+                    print(f"Block {new_block.index} rejected: Invalid hash (received {new_block.hash}, calculated {new_block.calculate_hash()})")
+                    self.send_response(400)
+                    self.end_headers()
+                    return
+                if not self.astralix.update_balances(transactions, new_block.validator, self.astralix.get_current_block_reward()):
+                    print(f"Block {new_block.index} rejected: Invalid transactions or reward")
+                    self.send_response(400)
+                    self.end_headers()
+                    return
+                self.astralix.chain.append(new_block)
+                self.astralix.pending_transactions = []
+                self.astralix.save_data()
+                print(f"Block {new_block.index} added from peer {self.client_address}")
+                self.send_response(200)
+                self.send_header("Content-type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps({"status": "success"}).encode())
             except Exception as e:
-                print(f"Error processing block: {e}")
+                print(f"Error processing block from {self.client_address}: {e}, Data: {post_data}")
                 self.send_response(400)
                 self.end_headers()
         else:
+            print(f"Invalid POST request from {self.client_address}: {self.path}")
             self.send_response(404)
             self.end_headers()
 
@@ -722,7 +735,7 @@ if 'DYNO' in os.environ:
     try:
         astralix.listen_for_blocks(host='0.0.0.0', port=int(os.getenv("PORT", 5000)))
     except Exception as e:
-        print(f"Error starting HTTP server: {e}")
+        print(f"Error starting HTTP server on Heroku: {e}")
         raise
 else:
     # Locally (e.g., Termux), run the interactive interface
