@@ -9,13 +9,13 @@ import threading
 import socketserver
 
 class Transaction:
-    def __init__(self, sender, receiver, amount, tx_type="normal", data=None):
+    def __init__(self, sender, receiver, amount, tx_type="normal", data=None, timestamp=None):
         self.sender = sender
         self.receiver = receiver
         self.amount = amount
         self.tx_type = tx_type
         self.data = data
-        self.timestamp = time.time()
+        self.timestamp = timestamp if timestamp is not None else time.time()
         self.hash = self.calculate_hash()
         self.signature = None
 
@@ -90,17 +90,25 @@ class Blockchain:
         try:
             with open("astralix100_data.json", "r") as f:
                 data = json.load(f)
-                self.chain = [Block(b["index"], b["previous_hash"], b["timestamp"],
-                                   [Transaction(tx["sender"], tx["receiver"], tx["amount"], tx["tx_type"],
-                                                tx["data"], tx["timestamp"]) for tx in b["transactions"]],
-                                   b["validator"]) for b in data["chain"]]
-                for block in self.chain:
-                    for tx in block.transactions:
-                        tx.hash = tx.calculate_hash()
-                        tx.signature = tx.signature
-                    block.hash = block.calculate_hash()
-                self.pending_transactions = [Transaction(tx["sender"], tx["receiver"], tx["amount"], tx["tx_type"],
-                                                        tx["data"], tx["timestamp"]) for tx in data.get("pending_transactions", [])]
+                self.chain = []
+                for b in data["chain"]:
+                    transactions = []
+                    for tx in b["transactions"]:
+                        transaction = Transaction(tx["sender"], tx["receiver"], tx["amount"], tx["tx_type"],
+                                                tx.get("data"), tx["timestamp"])
+                        transaction.hash = tx["hash"]
+                        transaction.signature = tx["signature"]
+                        transactions.append(transaction)
+                    block = Block(b["index"], b["previous_hash"], b["timestamp"], transactions, b["validator"])
+                    block.hash = b["hash"]
+                    self.chain.append(block)
+                self.pending_transactions = []
+                for tx in data.get("pending_transactions", []):
+                    transaction = Transaction(tx["sender"], tx["receiver"], tx["amount"], tx["tx_type"],
+                                            tx.get("data"), tx["timestamp"])
+                    transaction.hash = tx["hash"]
+                    transaction.signature = tx["signature"]
+                    self.pending_transactions.append(transaction)
                 self.balances = data.get("balances", {})
                 self.staked_amounts = data.get("staked_amounts", {})
                 self.public_keys = data.get("public_keys", {})
@@ -242,14 +250,23 @@ class BlockchainHandler(BaseHTTPRequestHandler):
             post_data = self.rfile.read(content_length)
             try:
                 block_data = json.loads(post_data.decode())
-                transactions = [Transaction(tx["sender"], tx["receiver"], tx["amount"], tx["tx_type"],
-                                           tx["data"], tx["timestamp"]) for tx in block_data["transactions"]]
-                for tx in transactions:
-                    tx.hash = tx.hash
-                    tx.signature = tx.signature
+                transactions = []
+                for tx in block_data["transactions"]:
+                    transaction = Transaction(tx["sender"], tx["receiver"], tx["amount"], tx["tx_type"],
+                                            tx.get("data"), tx["timestamp"])
+                    transaction.hash = tx["hash"]
+                    transaction.signature = tx["signature"]
+                    transactions.append(transaction)
                 new_block = Block(block_data["index"], block_data["previous_hash"],
                                  block_data["timestamp"], transactions, block_data["validator"])
                 new_block.hash = block_data["hash"]
+                calculated_hash = new_block.calculate_hash()
+                if new_block.hash != calculated_hash:
+                    self.send_response(400)
+                    self.send_header("Content-type", "application/json")
+                    self.end_headers()
+                    self.wfile.write(json.dumps({"error": f"Invalid hash: received {new_block.hash}, calculated {calculated_hash}"}).encode())
+                    return
                 if blockchain.add_block(new_block):
                     self.send_response(200)
                     self.send_header("Content-type", "application/json")
@@ -259,7 +276,7 @@ class BlockchainHandler(BaseHTTPRequestHandler):
                     self.send_response(400)
                     self.send_header("Content-type", "application/json")
                     self.end_headers()
-                    self.wfile.write(json.dumps({"error": f"Block validation failed"}).encode())
+                    self.wfile.write(json.dumps({"error": "Block validation failed"}).encode())
             except Exception as e:
                 self.send_response(400)
                 self.send_header("Content-type", "application/json")
@@ -284,15 +301,18 @@ def sync_with_seed(seed_url):
         response = requests.get(f"{seed_url}/get_chain")
         if response.status_code == 200:
             data = response.json()
-            new_chain = [Block(b["index"], b["previous_hash"], b["timestamp"],
-                              [Transaction(tx["sender"], tx["receiver"], tx["amount"], tx["tx_type"],
-                                          tx["data"], tx["timestamp"]) for tx in b["transactions"]],
-                              b["validator"]) for b in data["chain"]]
-            for block in new_chain:
-                for tx in block.transactions:
-                    tx.hash = tx.calculate_hash()
-                    tx.signature = tx.signature
-                block.hash = block.calculate_hash()
+            new_chain = []
+            for b in data["chain"]:
+                transactions = []
+                for tx in b["transactions"]:
+                    transaction = Transaction(tx["sender"], tx["receiver"], tx["amount"], tx["tx_type"],
+                                            tx.get("data"), tx["timestamp"])
+                    transaction.hash = tx["hash"]
+                    transaction.signature = tx["signature"]
+                    transactions.append(transaction)
+                block = Block(b["index"], b["previous_hash"], b["timestamp"], transactions, b["validator"])
+                block.hash = b["hash"]
+                new_chain.append(block)
                 print(f"Block created: Index {block.index}, Hash {block.hash}")
             temp_blockchain = Blockchain()
             temp_blockchain.chain = new_chain
@@ -303,7 +323,9 @@ def sync_with_seed(seed_url):
                     if tx.verify_signature(data.get("public_keys", {})):
                         preserved_txs.append(tx)
                     else:
-                        print(f"Transaction validation failed: Missing signature or public key for {tx.sender}")
+                        print(f"Transaction validation failed: Missing
+
+signature or public key for {tx.sender}")
                 blockchain.chain = new_chain
                 blockchain.public_keys.update(data.get("public_keys", {}))
                 blockchain.pending_transactions = preserved_txs
