@@ -21,7 +21,7 @@ AstraliX Blockchain and ALX Token (Testnet Ready)
   - Wallet addresses with 'ALX' prefix.
   - Support for smart contracts (basic storage).
   - Persistence in astralix_data.json.
-  - P2P networking with HTTP endpoint for chain sync to Heroku seed node.
+  - P2P networking with HTTP endpoint for chain sync and block addition to Heroku seed node.
 - Run with: python astralix100.py
 """
 
@@ -189,13 +189,12 @@ class AstraliX:
         # Sync chain from the Heroku seed node using HTTPS
         for host, port in self.seed_nodes:
             try:
-                # Use HTTPS and ignore port for Heroku
                 url = f"https://{host}/get_chain"
                 print(f"Attempting to sync with {url}")
-                response = requests.get(url, timeout=30)  # Increased timeout for Heroku
+                response = requests.get(url, timeout=30)
                 if response.status_code == 200:
                     data = response.json()
-                    self.chain = []
+                    new_chain = []
                     for block_data in data["chain"]:
                         transactions = [Transaction(tx["sender"], tx["receiver"], float(tx["amount"]), 
                                                    tx.get("tx_type", "normal"), tx.get("data"), tx.get("signature")) 
@@ -203,24 +202,40 @@ class AstraliX:
                         block = Block(block_data["index"], block_data["previous_hash"], 
                                       block_data["timestamp"], transactions, block_data["validator"])
                         block.hash = block_data["hash"]
-                        self.chain.append(block)
-                    self.balances = {k: float(v) for k, v in data["balances"].items()}
-                    self.stakers = {k: float(v) for k, v in data.get("stakers", {}).items()}
-                    self.public_keys = data.get("public_keys", {})
-                    self.contract_states = data.get("contract_states", {})
-                    self.current_supply = float(data["current_supply"])
-                    if self.is_chain_valid():
+                        new_chain.append(block)
+                    if len(new_chain) > len(self.chain) and self.is_chain_valid(new_chain):
+                        self.chain = new_chain
+                        self.balances = {k: float(v) for k, v in data["balances"].items()}
+                        self.stakers = {k: float(v) for k, v in data.get("stakers", {}).items()}
+                        self.public_keys = data.get("public_keys", {})
+                        self.contract_states = data.get("contract_states", {})
+                        self.current_supply = float(data["current_supply"])
                         print(f"Chain synced from {host}")
                         self.save_data()
                         return True
                     else:
-                        print(f"Invalid chain from {host}")
-                        self.chain = [self.create_genesis_block()]
+                        print(f"Seed chain not longer or invalid from {host}")
                 else:
                     print(f"Failed to sync from {host}: HTTP {response.status_code}")
             except requests.exceptions.RequestException as e:
                 print(f"Failed to sync from {host}: {e}")
         print("Sync failed, keeping local chain")
+        return False
+
+    def send_block_to_seed(self, block):
+        # Send a block to the seed node
+        for host, port in self.seed_nodes:
+            try:
+                url = f"https://{host}/add_block"
+                print(f"Sending block {block.index} to {url}")
+                response = requests.post(url, json=block.to_dict(), timeout=30)
+                if response.status_code == 200:
+                    print(f"Block {block.index} accepted by {host}")
+                    return True
+                else:
+                    print(f"Failed to send block to {host}: HTTP {response.status_code}")
+            except requests.exceptions.RequestException as e:
+                print(f"Failed to send block to {host}: {e}")
         return False
 
     def get_current_block_reward(self):
@@ -377,17 +392,19 @@ class AstraliX:
         timestamp = time.time()
         new_block = Block(index, previous_hash, timestamp, transactions, validator)
         self.chain.append(new_block)
-        self.broadcast_block(new_block)
+        self.send_block_to_seed(new_block)  # Send block to seed node
         print(f"Current supply after block {index}: {self.current_supply} ALX")
         self.pending_transactions = []
         self.save_data()
         return True
 
-    def is_chain_valid(self):
+    def is_chain_valid(self, chain=None):
         # Validate chain by checking hashes and transactions
-        for i in range(1, len(self.chain)):
-            current = self.chain[i]
-            previous = self.chain[i-1]
+        if chain is None:
+            chain = self.chain
+        for i in range(1, len(chain)):
+            current = chain[i]
+            previous = chain[i-1]
             calculated_hash = current.calculate_hash()
             if current.hash != calculated_hash:
                 print(f"Chain validation failed at block {i}: Hash mismatch (stored: {current.hash}, calculated: {calculated_hash})")
@@ -661,6 +678,45 @@ class AstraliXRequestHandler(BaseHTTPRequestHandler):
                 "current_supply": self.astralix.current_supply
             }
             self.wfile.write(json.dumps(data).encode())
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+    def do_POST(self):
+        # Handle POST requests to add new blocks
+        if self.path == "/add_block":
+            content_length = int(self.headers['Content-Length'])
+            post_data = self.rfile.read(content_length)
+            try:
+                block_data = json.loads(post_data.decode())
+                transactions = [Transaction(tx["sender"], tx["receiver"], float(tx["amount"]),
+                                           tx.get("tx_type", "normal"), tx.get("data"), tx.get("signature"))
+                                for tx in block_data["transactions"]]
+                block = Block(block_data["index"], block_data["previous_hash"],
+                              block_data["timestamp"], transactions, block_data["validator"])
+                block.hash = block_data["hash"]
+                if block.index == len(self.astralix.chain) and block.previous_hash == self.astralix.get_latest_block().hash:
+                    temp_chain = self.astralix.chain + [block]
+                    if self.astralix.is_chain_valid(temp_chain):
+                        self.astralix.chain.append(block)
+                        self.astralix.update_balances(transactions, block.validator, self.astralix.get_current_block_reward())
+                        self.astralix.save_data()
+                        self.send_response(200)
+                        self.end_headers()
+                        self.wfile.write(b"Block added")
+                        print(f"Block {block.index} added from peer")
+                    else:
+                        print(f"Invalid block received: {block.hash}")
+                        self.send_response(400)
+                        self.end_headers()
+                else:
+                    print(f"Block out of sync: {block.index}")
+                    self.send_response(400)
+                    self.end_headers()
+            except Exception as e:
+                print(f"Error processing block: {e}")
+                self.send_response(500)
+                self.end_headers()
         else:
             self.send_response(404)
             self.end_headers()
