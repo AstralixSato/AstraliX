@@ -121,7 +121,7 @@ class AstraliX:
         self.chain = []
         self.pending_transactions = []
         self.data_file = "astralix_data.json"
-        self.seed_nodes = [("astralix-87c3a03ccde8.herokuapp.com", int(os.getenv("PORT", 5000)))]  # Heroku seed node
+        self.seed_nodes = [("astralix-87c3a03ccde8.herokuapp.com", 443)]  # Heroku seed node with HTTPS port
         self.load_data()
         if not self.chain or not self.is_chain_valid():
             print("Invalid chain or no chain found, creating new genesis block")
@@ -186,10 +186,13 @@ class AstraliX:
             print("No data file found, starting with empty chain")
 
     def sync_chain(self):
-        # Sync chain from the Heroku seed node
+        # Sync chain from the Heroku seed node using HTTPS
         for host, port in self.seed_nodes:
             try:
-                response = requests.get(f"http://{host}:{port}/get_chain", timeout=10)
+                # Use HTTPS and ignore port for Heroku
+                url = f"https://{host}/get_chain"
+                print(f"Attempting to sync with {url}")
+                response = requests.get(url, timeout=5)  # Reduced timeout for faster feedback
                 if response.status_code == 200:
                     data = response.json()
                     self.chain = []
@@ -207,14 +210,17 @@ class AstraliX:
                     self.contract_states = data.get("contract_states", {})
                     self.current_supply = float(data["current_supply"])
                     if self.is_chain_valid():
-                        print(f"Chain synced from {host}:{port}")
+                        print(f"Chain synced from {host}")
                         self.save_data()
                         return True
                     else:
-                        print(f"Invalid chain from {host}:{port}")
+                        print(f"Invalid chain from {host}")
                         self.chain = [self.create_genesis_block()]
-            except Exception as e:
-                print(f"Failed to sync from {host}:{port}: {e}")
+                else:
+                    print(f"Failed to sync from {host}: HTTP {response.status_code}")
+            except requests.exceptions.RequestException as e:
+                print(f"Failed to sync from {host}: {e}")
+        print("Sync failed, keeping local chain")
         return False
 
     def get_current_block_reward(self):
@@ -661,8 +667,8 @@ class AstraliXRequestHandler(BaseHTTPRequestHandler):
 # Create AstraliX blockchain
 astralix = AstraliX(max_supply=100_000_000, initial_supply=10_000_000, initial_block_reward=10, halving_interval=500_000)
 
-# Start listener in background
-threading.Thread(target=astralix.listen_for_blocks, args=('0.0.0.0', int(os.getenv("PORT", 5000)))).start()
-
-# Run the text-based interface
+# Run the text-based interface first
 astralix.run_interface()
+
+# Start listener in background after interface exits
+threading.Thread(target=astralix.listen_for_blocks, args=('0.0.0.0', int(os.getenv("PORT", 5000)))).start()
