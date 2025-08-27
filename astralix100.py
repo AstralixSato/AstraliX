@@ -192,7 +192,7 @@ class AstraliX:
                 # Use HTTPS and ignore port for Heroku
                 url = f"https://{host}/get_chain"
                 print(f"Attempting to sync with {url}")
-                response = requests.get(url, timeout=15)  # Increased timeout for Heroku
+                response = requests.get(url, timeout=30)  # Increased timeout for Heroku
                 if response.status_code == 200:
                     data = response.json()
                     self.chain = []
@@ -438,7 +438,8 @@ class AstraliX:
             print(f"Listening for blocks on {host}:{port}")
             server.serve_forever()
         except Exception as e:
-            print(f"Error starting listener: {e}")
+            print(f"Error starting HTTP server: {e}")
+            raise
 
     def generate_address(self, public_key):
         # Generate a wallet address from the public key using SHA-256, prefixed with 'ALX'
@@ -670,7 +671,11 @@ astralix = AstraliX(max_supply=100_000_000, initial_supply=10_000_000, initial_b
 # Check if running on Heroku (DYNO environment variable is set)
 if 'DYNO' in os.environ:
     # On Heroku, start the HTTP server directly
-    astralix.listen_for_blocks(host='0.0.0.0', port=int(os.getenv("PORT", 5000)))
+    try:
+        astralix.listen_for_blocks(host='0.0.0.0', port=int(os.getenv("PORT", 5000)))
+    except Exception as e:
+        print(f"Error starting HTTP server: {e}")
+        raise
 else:
     # Locally (e.g., Termux), run the interactive interface
     astralix.run_interface()
