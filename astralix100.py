@@ -137,7 +137,7 @@ class AstraliX:
     def create_genesis_block(self):
         # Create first block with initial supply distribution
         genesis_tx = Transaction("system", "genesis_miner", self.current_supply, tx_type="normal")
-        genesis = Block(0, "0", 1756276414.6047966, [genesis_tx], "genesis_miner")  # Fixed timestamp for consistency
+        genesis = Block(0, "0", 1756276414.6047966, [genesis_tx], "genesis_miner")  # Fixed timestamp
         genesis.hash = "2ce949be2a9eb8cd69b61823043e49c5bfc4379c9a7613b004198d04aa681c45"  # Fixed hash
         return genesis
 
@@ -187,6 +187,7 @@ class AstraliX:
 
     def sync_chain(self):
         # Sync chain from the Heroku seed node using HTTPS
+        temp_pending = self.pending_transactions.copy()  # Preserve pending transactions
         for host, port in self.seed_nodes:
             try:
                 url = f"https://{host}/get_chain"
@@ -215,7 +216,9 @@ class AstraliX:
                         self.public_keys = data.get("public_keys", {})
                         self.contract_states = data.get("contract_states", {})
                         self.current_supply = float(data["current_supply"])
-                        print(f"Chain synced from {host}")
+                        # Restore valid pending transactions
+                        self.pending_transactions = [tx for tx in temp_pending if self.validate_transaction(tx)]
+                        print(f"Chain synced from {host}, {len(self.pending_transactions)} pending transactions preserved")
                         self.save_data()
                         return True
                     else:
@@ -226,7 +229,28 @@ class AstraliX:
             except requests.exceptions.RequestException as e:
                 print(f"Failed to sync from {host}: {e}")
         print("Sync failed, keeping local chain")
+        self.pending_transactions = temp_pending  # Restore pending transactions on failure
         return False
+
+    def validate_transaction(self, tx):
+        # Validate a single transaction
+        sender_clean = tx.sender.lstrip("ALX")
+        receiver_clean = tx.receiver.lstrip("ALX")
+        if tx.tx_type == "normal" and tx.sender != "system":
+            if not tx.signature or not self.public_keys.get(sender_clean):
+                print(f"Transaction validation failed: Missing signature or public key for {tx.sender}")
+                return False
+            if not tx.verify_signature(self.public_keys[sender_clean]):
+                print(f"Transaction validation failed: Invalid signature for {tx.sender}")
+                return False
+            if self.balances.get(sender_clean, 0) < tx.amount:
+                print(f"Transaction validation failed: {tx.sender} has insufficient balance")
+                return False
+        elif tx.tx_type == "contract":
+            if tx.amount > 0 and self.balances.get(sender_clean, 0) < tx.amount:
+                print(f"Transaction validation failed: {tx.sender} has insufficient balance")
+                return False
+        return True
 
     def get_current_block_reward(self):
         # Calculate current block reward with halving
@@ -439,7 +463,7 @@ class AstraliX:
             print(f"Listening for blocks on {host}:{port}")
             server.serve_forever()
         except Exception as e:
-            print(f"Error starting HTTP server: {e}")
+            print(f"Error starting HTTP server on Heroku: {e}")
             raise
 
     def generate_address(self, public_key):
@@ -693,21 +717,32 @@ class AstraliXRequestHandler(BaseHTTPRequestHandler):
                     print(f"Block {new_block.index} rejected: Invalid index (expected {len(self.astralix.chain)})")
                     self.send_response(400)
                     self.end_headers()
+                    self.wfile.write(json.dumps({"error": f"Invalid index: {new_block.index}, expected {len(self.astralix.chain)}"}).encode())
                     return
                 if new_block.previous_hash != self.astralix.get_latest_block().hash:
                     print(f"Block {new_block.index} rejected: Previous hash mismatch (received {new_block.previous_hash}, expected {self.astralix.get_latest_block().hash})")
                     self.send_response(400)
                     self.end_headers()
+                    self.wfile.write(json.dumps({"error": f"Previous hash mismatch: received {new_block.previous_hash}, expected {self.astralix.get_latest_block().hash}"}).encode())
                     return
                 if new_block.hash != new_block.calculate_hash():
                     print(f"Block {new_block.index} rejected: Invalid hash (received {new_block.hash}, calculated {new_block.calculate_hash()})")
                     self.send_response(400)
                     self.end_headers()
+                    self.wfile.write(json.dumps({"error": f"Invalid hash: received {new_block.hash}, calculated {new_block.calculate_hash()}"}).encode())
                     return
+                for tx in transactions:
+                    if not self.astralix.validate_transaction(tx):
+                        print(f"Block {new_block.index} rejected: Invalid transaction {tx.hash}")
+                        self.send_response(400)
+                        self.end_headers()
+                        self.wfile.write(json.dumps({"error": f"Invalid transaction: {tx.hash}"}).encode())
+                        return
                 if not self.astralix.update_balances(transactions, new_block.validator, self.astralix.get_current_block_reward()):
                     print(f"Block {new_block.index} rejected: Invalid transactions or reward")
                     self.send_response(400)
                     self.end_headers()
+                    self.wfile.write(json.dumps({"error": "Invalid transactions or reward"}).encode())
                     return
                 self.astralix.chain.append(new_block)
                 self.astralix.pending_transactions = []
@@ -721,6 +756,7 @@ class AstraliXRequestHandler(BaseHTTPRequestHandler):
                 print(f"Error processing block from {self.client_address}: {e}, Data: {post_data}")
                 self.send_response(400)
                 self.end_headers()
+                self.wfile.write(json.dumps({"error": str(e)}).encode())
         else:
             print(f"Invalid POST request from {self.client_address}: {self.path}")
             self.send_response(404)
