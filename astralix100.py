@@ -94,7 +94,7 @@ class Blockchain:
         self.pending_transactions = []
         self.balances = {}
         self.public_keys = {}
-        self.private_keys = {}
+        self.private_keys = {}  # Solo se usa en el cliente (Termux)
         self.load_data()
         if not self.chain or not self.validate_chain():
             print("Invalid chain or no chain found. Please generate or register an address to create the genesis block.")
@@ -129,8 +129,9 @@ class Blockchain:
                     self.pending_transactions.append(transaction)
                 self.balances = {k: float(v) for k, v in data.get("balances", {}).items()}
                 self.public_keys = {k: v for k, v in data.get("public_keys", {}).items()}
-                self.private_keys = {k: v for k, v in data.get("private_keys", {}).items()}
                 self.current_supply = float(data.get("current_supply", self.current_supply))
+                if 'DYNO' not in os.environ:
+                    self.private_keys = {k: v for k, v in data.get("private_keys", {}).items()}
                 print(f"Data loaded from astralix513_data.json")
         except FileNotFoundError:
             print("No data file found, starting fresh")
@@ -155,9 +156,10 @@ class Blockchain:
                                        for tx in self.pending_transactions],
                 "balances": self.balances,
                 "public_keys": self.public_keys,
-                "private_keys": self.private_keys,
                 "current_supply": self.current_supply
             }
+            if 'DYNO' not in os.environ:
+                data["private_keys"] = self.private_keys  # Solo guardar private_keys en el cliente
             with open("astralix513_data.json", "w") as f:
                 json.dump(data, f, indent=2)
                 f.flush()
@@ -303,8 +305,7 @@ class BlockchainHandler(BaseHTTPRequestHandler):
                 response = {
                     "chain": chain_data,
                     "public_keys": self.blockchain.public_keys,
-                    "private_keys": self.blockchain.private_keys,
-                    "balances": self.blockchain.balances,  # Corregido: usar self.blockchain.balances
+                    "balances": self.blockchain.balances,
                     "current_supply": self.blockchain.current_supply
                 }
                 response_json = json.dumps(response)
@@ -335,7 +336,6 @@ class BlockchainHandler(BaseHTTPRequestHandler):
                 new_block = Block(block_data["index"], block_data["previous_hash"],
                                  block_data["timestamp"], transactions, block_data["validator"])
                 new_block.hash = block_data["hash"]
-                # Actualizar public_keys antes de validar el bloque
                 self.blockchain.public_keys.update(block_data.get("public_keys", {}))
                 if self.blockchain.add_block(new_block):
                     self.send_response(200)
@@ -373,7 +373,6 @@ class BlockchainHandler(BaseHTTPRequestHandler):
                     new_chain.append(block)
                 if self.blockchain.replace_chain(new_chain):
                     self.blockchain.public_keys.update(data.get("public_keys", {}))
-                    self.blockchain.private_keys.update(data.get("private_keys", {}))
                     self.blockchain.balances = {k: float(v) for k, v in data.get("balances", {}).items()}
                     self.blockchain.current_supply = float(data.get("current_supply", self.blockchain.current_supply))
                     self.send_response(200)
@@ -417,7 +416,7 @@ def run_server(port=5000):
 def sync_with_seed(seed_url):
     try:
         print(f"Attempting to sync with {seed_url}/get_chain")
-        response = requests.get(f"{seed_url}/get_chain", timeout=5)
+        response = requests.get(f"{seed_url}/get_chain", timeout=10)
         print(f"Received response with status code: {response.status_code}")
         print(f"Response content: {response.text}")
         if response.status_code == 200:
@@ -440,10 +439,9 @@ def sync_with_seed(seed_url):
                                                 json={
                                                     "chain": chain_data,
                                                     "public_keys": blockchain.public_keys,
-                                                    "private_keys": blockchain.private_keys,
                                                     "balances": blockchain.balances,
                                                     "current_supply": blockchain.current_supply
-                                                }, timeout=5)
+                                                }, timeout=10)
                         print(f"Pushing local chain to {seed_url}/replace_chain")
                         if response.status_code == 200:
                             print("Local chain successfully pushed to seed node")
@@ -475,7 +473,6 @@ def sync_with_seed(seed_url):
                 print("Chain validation passed")
                 blockchain.chain = new_chain
                 blockchain.public_keys.update(data.get("public_keys", {}))
-                blockchain.private_keys.update(data.get("private_keys", {}))
                 blockchain.balances = {k: float(v) for k, v in data.get("balances", blockchain.balances).items()}
                 blockchain.current_supply = float(data.get("current_supply", blockchain.current_supply))
                 blockchain.pending_transactions = []
@@ -589,8 +586,8 @@ def main():
                                                                         ],
                                                                         "validator": block.validator,
                                                                         "hash": block.hash,
-                                                                        "public_keys": blockchain.public_keys  # Enviar claves públicas
-                                                                    }, timeout=5)
+                                                                        "public_keys": blockchain.public_keys
+                                                                    }, timeout=10)
                                             print(f"Sending block {block.index} to https://astralix-87c3a03ccde8.herokuapp.com/add_block")
                                             if response.status_code == 200:
                                                 print("Block sent successfully to seed node")
@@ -683,8 +680,8 @@ def main():
                                                     ],
                                                     "validator": block.validator,
                                                     "hash": block.hash,
-                                                    "public_keys": blockchain.public_keys  # Enviar claves públicas
-                                                }, timeout=5)
+                                                    "public_keys": blockchain.public_keys
+                                                }, timeout=10)
                         print(f"Sending block {block.index} to https://astralix-87c3a03ccde8.herokuapp.com/add_block")
                         if response.status_code == 200:
                             print("Block sent successfully to seed node")
