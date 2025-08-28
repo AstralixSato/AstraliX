@@ -26,15 +26,6 @@ AstraliX Blockchain and ALX Token (Testnet Ready)
 # Configure logging for server messages
 logging.basicConfig(filename='astralix_server.log', level=logging.INFO, format='%(asctime)s - %(message)s')
 
-# Predefined private key for genesis_miner
-GENESIS_PRIVATE_KEY = "5d7f9e8a2b1c4d6e9f0a3b2c7d8e1f4a5b6c9d0e2f3a4b5c6d7e8f9a0b1c2d3"
-
-# Predefined public key for genesis_miner (derived from the private key)
-GENESIS_PUBLIC_KEY = "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0"
-
-# Predefined address for genesis_miner
-GENESIS_ADDRESS = "ALX8f9e0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f"
-
 class Transaction:
     def __init__(self, sender, receiver, amount, timestamp=None):
         self.sender = sender
@@ -70,9 +61,6 @@ class Transaction:
             return False
         try:
             public_key = public_keys[self.sender]
-            if not public_key.startswith("a1") or len(public_key) != 128:
-                print(f"Signature verification failed: Invalid public key format for {self.sender}: {public_key}")
-                return False
             vk = ecdsa.VerifyingKey.from_string(binascii.unhexlify(public_key), curve=ecdsa.SECP256k1)
             verified = vk.verify(binascii.unhexlify(self.signature), self.hash.encode())
             print(f"Signature verification for {self.hash}: {'Valid' if verified else 'Invalid'}")
@@ -101,18 +89,16 @@ class Blockchain:
         self.chain = []
         self.pending_transactions = []
         self.balances = {}
-        self.public_keys = {GENESIS_ADDRESS: GENESIS_PUBLIC_KEY}
+        self.public_keys = {}
         self.load_data()
         if not self.chain or not self.validate_chain():
-            print("Invalid chain or no chain found, creating new genesis block")
-            self.chain = [self.create_genesis_block()]
-            self.balances = {GENESIS_ADDRESS: self.current_supply}
-            self.save_data()
-        print(f"Blockchain initialized. Current supply: {self.current_supply} ALX")
+            print("Invalid chain or no chain found. Please generate an address to create the genesis block.")
+        else:
+            print(f"Blockchain initialized. Current supply: {self.current_supply} ALX")
 
-    def create_genesis_block(self):
-        genesis_tx = Transaction("system", GENESIS_ADDRESS, self.current_supply)
-        genesis = Block(0, "0", time.time(), [genesis_tx], GENESIS_ADDRESS)
+    def create_genesis_block(self, genesis_address):
+        genesis_tx = Transaction("system", genesis_address, self.current_supply)
+        genesis = Block(0, "0", time.time(), [genesis_tx], genesis_address)
         return genesis
 
     def load_data(self):
@@ -213,7 +199,7 @@ class Blockchain:
         print(f"Block {block.index} added successfully")
         return True
 
-    def mine_block(self):
+    def mine_block(self, validator):
         if not self.pending_transactions:
             print("No transactions to add to block")
             return None
@@ -230,7 +216,6 @@ class Blockchain:
         if not valid_transactions:
             print("No valid transactions to mine")
             return None
-        validator = GENESIS_ADDRESS
         print(f"Selected validator: {validator}")
         new_block = Block(len(self.chain), self.chain[-1].hash, time.time(), valid_transactions, validator)
         if self.add_block(new_block):
@@ -318,10 +303,9 @@ def run_server(port=5000):
         if 'DYNO' not in os.environ:
             print(f"Starting local server on port {port}, logging to astralix_server.log")
             with open('astralix_server.log', 'a') as f:
-                with redirect_stdout(f):
-                    server = HTTPServer(("", port), BlockchainHandler)
-                    logging.info(f"Listening for blocks on 0.0.0.0:{port}")
-                    server.serve_forever()
+                server = HTTPServer(("", port), BlockchainHandler)
+                logging.info(f"Listening for blocks on 0.0.0.0:{port}")
+                server.serve_forever()
         else:
             server = HTTPServer(("", port), BlockchainHandler)
             print(f"Listening for blocks on 0.0.0.0:{port}")
@@ -387,10 +371,12 @@ def main():
             print(f"Error starting HTTP server on Heroku: {e}")
             raise
     else:
-        # Desactivar el servidor local para evitar congelamiento
+        # Desactivar el servidor local para evitar congelamiento en Termux
         # threading.Thread(target=run_server, daemon=True).start()
         print("Local HTTP server disabled to prevent freezing. Enable it later if needed.")
         while True:
+            if not blockchain.public_keys and not blockchain.chain:
+                print("\nNo addresses registered. Please generate an address (option 1) to initialize the blockchain.")
             print("\n=== AstraliX Blockchain Interface ===")
             print("1. Generate new key pair and address")
             print("2. Register public key (manual)")
@@ -408,7 +394,13 @@ def main():
                 public_key = binascii.hexlify(sk.get_verifying_key().to_string()).decode()
                 address = blockchain.generate_address(public_key)
                 blockchain.public_keys[address] = public_key
-                blockchain.save_data()
+                if not blockchain.chain:
+                    blockchain.chain = [blockchain.create_genesis_block(address)]
+                    blockchain.balances[address] = blockchain.current_supply
+                    blockchain.save_data()
+                    print(f"Genesis block created with address: {address}")
+                else:
+                    blockchain.save_data()
                 print(f"Generated address: {address}")
                 print(f"Private Key: {private_key}")
                 print(f"Public Key: {public_key}")
@@ -418,12 +410,21 @@ def main():
                 address = input("Enter address: ").strip()
                 public_key = input("Enter public key: ").strip()
                 blockchain.public_keys[address] = public_key
-                blockchain.save_data()
+                if not blockchain.chain:
+                    blockchain.chain = [blockchain.create_genesis_block(address)]
+                    blockchain.balances[address] = blockchain.current_supply
+                    blockchain.save_data()
+                    print(f"Genesis block created with address: {address}")
+                else:
+                    blockchain.save_data()
                 print(f"Registered public key for {address}")
 
             elif choice == "3":
+                if not blockchain.public_keys:
+                    print("Error: No addresses registered. Generate an address first (option 1).")
+                    continue
                 sender = input("Enter sender address: ").strip()
-                if sender != GENESIS_ADDRESS and sender not in blockchain.public_keys:
+                if sender not in blockchain.public_keys:
                     print(f"Error: No public key registered for {sender}")
                     continue
                 receiver = input("Enter receiver address: ").strip()
@@ -457,6 +458,9 @@ def main():
                 print(f"Balance for {address}: {balance} ALX")
 
             elif choice == "5":
+                if not blockchain.chain:
+                    print("No blockchain initialized. Generate an address first (option 1).")
+                    continue
                 for block in blockchain.chain:
                     print(f"\nBlock {block.index}:")
                     print(f"Hash: {block.hash}")
@@ -468,7 +472,14 @@ def main():
                 print(f"Is chain valid? {blockchain.validate_chain()}")
 
             elif choice == "6":
-                block = blockchain.mine_block()
+                if not blockchain.chain:
+                    print("No blockchain initialized. Generate an address first (option 1).")
+                    continue
+                if not blockchain.public_keys:
+                    print("No validator available. Generate an address first (option 1).")
+                    continue
+                validator = list(blockchain.public_keys.keys())[0]  # Usar la primera dirección como validador
+                block = blockchain.mine_block(validator)
                 if block:
                     try:
                         response = requests.post("https://astralix-87c3a03ccde8.herokuapp.com/add_block",
