@@ -26,9 +26,6 @@ AstraliX Blockchain and ALX Token (Testnet Ready)
 # Configure logging for server messages
 logging.basicConfig(filename='astralix_server.log', level=logging.INFO, format='%(asctime)s - %(message)s')
 
-# Lock para proteger acceso concurrente a blockchain
-blockchain_lock = threading.Lock()
-
 class Transaction:
     def __init__(self, sender, receiver, amount, timestamp=None):
         self.sender = sender
@@ -100,7 +97,6 @@ class Blockchain:
         self.load_data()
         if not self.chain or not self.validate_chain():
             if 'DYNO' in os.environ:
-                # Inicializar bloque génesis en Heroku si no hay datos
                 sk = ecdsa.SigningKey.generate(curve=ecdsa.SECP256k1)
                 public_key = binascii.hexlify(sk.get_verifying_key().to_string()).decode()
                 address = self.generate_address(public_key)
@@ -154,28 +150,30 @@ class Blockchain:
 
     def save_data(self):
         try:
-            with blockchain_lock:
-                data = {
-                    "chain": [{"index": b.index, "previous_hash": b.previous_hash, "timestamp": b.timestamp,
-                              "transactions": [{"sender": tx.sender, "receiver": tx.receiver, "amount": tx.amount,
-                                               "timestamp": tx.timestamp, "hash": tx.hash, "signature": tx.signature}
-                                              for tx in b.transactions],
-                              "validator": b.validator, "hash": b.hash} for b in self.chain],
-                    "pending_transactions": [{"sender": tx.sender, "receiver": tx.receiver, "amount": tx.amount,
-                                            "timestamp": tx.timestamp, "hash": tx.hash, "signature": tx.signature}
-                                           for tx in self.pending_transactions],
-                    "balances": self.balances,
-                    "public_keys": self.public_keys,
-                    "current_supply": self.current_supply
-                }
-                with open("astralix_data.json", "w") as f:
-                    json.dump(data, f, indent=2)
-                print("Data saved to astralix_data.json")
+            data = {
+                "chain": [{"index": b.index, "previous_hash": b.previous_hash, "timestamp": b.timestamp,
+                          "transactions": [{"sender": tx.sender, "receiver": tx.receiver, "amount": tx.amount,
+                                           "timestamp": tx.timestamp, "hash": tx.hash, "signature": tx.signature}
+                                          for tx in b.transactions],
+                          "validator": b.validator, "hash": b.hash} for b in self.chain],
+                "pending_transactions": [{"sender": tx.sender, "receiver": tx.receiver, "amount": tx.amount,
+                                        "timestamp": tx.timestamp, "hash": tx.hash, "signature": tx.signature}
+                                       for tx in self.pending_transactions],
+                "balances": self.balances,
+                "public_keys": self.public_keys,
+                "current_supply": self.current_supply
+            }
+            with open("astralix_data.json", "w") as f:
+                json.dump(data, f, indent=2)
+                f.flush()  # Forzar escritura al disco
+                os.fsync(f.fileno())  # Asegurar que los datos se escriban
+            print("Data saved to astralix_data.json")
         except Exception as e:
             print(f"Error saving data: {e}")
+            logging.error(f"Error saving data: {e}")
 
     def validate_chain(self):
-        with blockchain_lock:
+        try:
             for i, block in enumerate(self.chain):
                 if i == 0:
                     continue
@@ -192,9 +190,12 @@ class Blockchain:
                         return False
             print("Chain validation passed")
             return True
+        except Exception as e:
+            print(f"Error validating chain: {e}")
+            return False
 
     def add_block(self, block):
-        with blockchain_lock:
+        try:
             if block.previous_hash != self.chain[-1].hash:
                 print(f"Block {block.index} rejected: Previous hash mismatch")
                 return False
@@ -220,9 +221,12 @@ class Blockchain:
             self.save_data()
             print(f"Block {block.index} added successfully")
             return True
+        except Exception as e:
+            print(f"Error adding block: {e}")
+            return False
 
     def mine_block(self, validator):
-        with blockchain_lock:
+        try:
             if not self.pending_transactions:
                 print("No transactions to add to block")
                 return None
@@ -248,6 +252,9 @@ class Blockchain:
                 print(f"Block created: Index {new_block.index}, Hash {new_block.hash}")
                 return new_block
             return None
+        except Exception as e:
+            print(f"Error mining block: {e}")
+            return None
 
     def generate_address(self, public_key):
         return f"ALX{hashlib.sha256(public_key.encode()).hexdigest()[:40]}"
@@ -260,24 +267,23 @@ class BlockchainHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/get_chain":
             try:
-                with blockchain_lock:
-                    self.send_response(200)
-                    self.send_header("Content-type", "application/json")
-                    self.end_headers()
-                    chain_data = [{"index": b.index, "previous_hash": b.previous_hash, "timestamp": b.timestamp,
-                                  "transactions": [{"sender": tx.sender, "receiver": tx.receiver, "amount": tx.amount,
-                                                   "timestamp": tx.timestamp, "hash": tx.hash, "signature": tx.signature}
-                                                  for tx in b.transactions],
-                                  "validator": b.validator, "hash": b.hash} for b in self.blockchain.chain]
-                    response = {
-                        "chain": chain_data,
-                        "public_keys": self.blockchain.public_keys,
-                        "balances": self.blockchain.balances,
-                        "current_supply": self.blockchain.current_supply
-                    }
-                    response_json = json.dumps(response)
-                    self.wfile.write(response_json.encode())
-                    logging.info(f"Successfully sent chain data: {response_json}")
+                self.send_response(200)
+                self.send_header("Content-type", "application/json")
+                self.end_headers()
+                chain_data = [{"index": b.index, "previous_hash": b.previous_hash, "timestamp": b.timestamp,
+                              "transactions": [{"sender": tx.sender, "receiver": tx.receiver, "amount": tx.amount,
+                                               "timestamp": tx.timestamp, "hash": tx.hash, "signature": tx.signature}
+                                              for tx in b.transactions],
+                              "validator": b.validator, "hash": b.hash} for b in self.blockchain.chain]
+                response = {
+                    "chain": chain_data,
+                    "public_keys": self.blockchain.public_keys,
+                    "balances": self.blockchain.balances,
+                    "current_supply": self.blockchain.current_supply
+                }
+                response_json = json.dumps(response)
+                self.wfile.write(response_json.encode())
+                logging.info(f"Successfully sent chain data: {response_json}")
             except Exception as e:
                 logging.error(f"Error in do_GET: {str(e)}")
                 self.send_response(500)
@@ -303,19 +309,18 @@ class BlockchainHandler(BaseHTTPRequestHandler):
                 new_block = Block(block_data["index"], block_data["previous_hash"],
                                  block_data["timestamp"], transactions, block_data["validator"])
                 new_block.hash = block_data["hash"]
-                with blockchain_lock:
-                    if self.blockchain.add_block(new_block):
-                        self.send_response(200)
-                        self.send_header("Content-type", "application/json")
-                        self.end_headers()
-                        self.wfile.write(json.dumps({"message": "Block added successfully"}).encode())
-                        logging.info(f"Block {new_block.index} added successfully")
-                    else:
-                        self.send_response(400)
-                        self.send_header("Content-type", "application/json")
-                        self.end_headers()
-                        self.wfile.write(json.dumps({"error": "Block validation failed"}).encode())
-                        logging.error("Block validation failed")
+                if self.blockchain.add_block(new_block):
+                    self.send_response(200)
+                    self.send_header("Content-type", "application/json")
+                    self.end_headers()
+                    self.wfile.write(json.dumps({"message": "Block added successfully"}).encode())
+                    logging.info(f"Block {new_block.index} added successfully")
+                else:
+                    self.send_response(400)
+                    self.send_header("Content-type", "application/json")
+                    self.end_headers()
+                    self.wfile.write(json.dumps({"error": "Block validation failed"}).encode())
+                    logging.error("Block validation failed")
             except Exception as e:
                 logging.error(f"Error in do_POST: {str(e)}")
                 self.send_response(400)
@@ -373,25 +378,18 @@ def sync_with_seed(seed_url):
                 print(f"Block created: Index {block.index}, Hash {block.hash}")
             temp_blockchain = Blockchain()
             temp_blockchain.chain = new_chain
-            with blockchain_lock:
-                if temp_blockchain.validate_chain():
-                    print("Chain validation passed")
-                    preserved_txs = []
-                    for tx in blockchain.pending_transactions:
-                        if tx.verify_signature(data.get("public_keys", {})):
-                            preserved_txs.append(tx)
-                        else:
-                            print(f"Transaction validation failed: Invalid signature for {tx.sender} (hash: {tx.hash})")
-                    blockchain.chain = new_chain
-                    blockchain.public_keys.update(data.get("public_keys", {}))
-                    blockchain.balances = {k: float(v) for k, v in data.get("balances", blockchain.balances).items()}
-                    blockchain.current_supply = float(data.get("current_supply", blockchain.current_supply))
-                    blockchain.pending_transactions = preserved_txs
-                    blockchain.save_data()
-                    print(f"Chain synced from {seed_url}, {len(preserved_txs)} pending transactions preserved")
-                    return True
-                else:
-                    print("Chain validation failed")
+            if temp_blockchain.validate_chain():
+                print("Chain validation passed")
+                blockchain.chain = new_chain
+                blockchain.public_keys.update(data.get("public_keys", {}))
+                blockchain.balances = {k: float(v) for k, v in data.get("balances", blockchain.balances).items()}
+                blockchain.current_supply = float(data.get("current_supply", blockchain.current_supply))
+                blockchain.pending_transactions = []
+                blockchain.save_data()
+                print(f"Chain synced from {seed_url}, 0 pending transactions preserved")
+                return True
+            else:
+                print("Chain validation failed")
         else:
             print(f"Failed to sync: HTTP {response.status_code}, Response: {response.text}")
     except Exception as e:
@@ -426,11 +424,11 @@ def main():
             choice = input("Enter your choice (1-8): ").strip()
 
             if choice == "1":
-                sk = ecdsa.SigningKey.generate(curve=ecdsa.SECP256k1)
-                private_key = binascii.hexlify(sk.to_string()).decode()
-                public_key = binascii.hexlify(sk.get_verifying_key().to_string()).decode()
-                address = blockchain.generate_address(public_key)
-                with blockchain_lock:
+                try:
+                    sk = ecdsa.SigningKey.generate(curve=ecdsa.SECP256k1)
+                    private_key = binascii.hexlify(sk.to_string()).decode()
+                    public_key = binascii.hexlify(sk.get_verifying_key().to_string()).decode()
+                    address = blockchain.generate_address(public_key)
                     blockchain.public_keys[address] = public_key
                     if not blockchain.chain:
                         blockchain.chain = [blockchain.create_genesis_block(address)]
@@ -439,25 +437,26 @@ def main():
                         print(f"Genesis block created with address: {address}")
                     else:
                         blockchain.save_data()
-                print(f"Generated address: {address}")
-                print(f"Private Key: {private_key}")
-                print(f"Public Key: {public_key}")
-                print("Save these securely! The address is your wallet identifier.")
+                    print(f"Generated address: {address}")
+                    print(f"Private Key: {private_key}")
+                    print(f"Public Key: {public_key}")
+                    print("Save these securely! The address is your wallet identifier.")
+                except Exception as e:
+                    print(f"Error generating address: {e}")
 
             elif choice == "2":
                 address = input("Enter address: ").strip()
                 public_key = input("Enter public key: ").strip()
                 try:
                     ecdsa.VerifyingKey.from_string(binascii.unhexlify(public_key), curve=ecdsa.SECP256k1)
-                    with blockchain_lock:
-                        blockchain.public_keys[address] = public_key
-                        if not blockchain.chain:
-                            blockchain.chain = [blockchain.create_genesis_block(address)]
-                            blockchain.balances[address] = blockchain.current_supply
-                            blockchain.save_data()
-                            print(f"Genesis block created with address: {address}")
-                        else:
-                            blockchain.save_data()
+                    blockchain.public_keys[address] = public_key
+                    if not blockchain.chain:
+                        blockchain.chain = [blockchain.create_genesis_block(address)]
+                        blockchain.balances[address] = blockchain.current_supply
+                        blockchain.save_data()
+                        print(f"Genesis block created with address: {address}")
+                    else:
+                        blockchain.save_data()
                     print(f"Registered public key for {address}")
                 except Exception as e:
                     print(f"Error: Invalid public key format: {e}")
@@ -478,67 +477,63 @@ def main():
                         continue
                     private_key = input("Enter sender's private key: ").strip()
                     tx = Transaction(sender, receiver, amount)
-                    with blockchain_lock:
-                        signature = tx.sign(private_key, blockchain.public_keys[sender])
-                        if signature:
-                            blockchain.pending_transactions.append(tx)
-                            blockchain.save_data()
-                            print(f"Transaction created: {sender} -> {receiver} ({amount} ALX)")
-                            print(f"Transaction signed: {signature}")
-                        else:
-                            print("Failed to create transaction: Invalid signature or private key")
+                    signature = tx.sign(private_key, blockchain.public_keys[sender])
+                    if signature:
+                        blockchain.pending_transactions.append(tx)
+                        blockchain.save_data()
+                        print(f"Transaction created: {sender} -> {receiver} ({amount} ALX)")
+                        print(f"Transaction signed: {signature}")
+                    else:
+                        print("Failed to create transaction: Invalid signature or private key")
                 except ValueError:
                     print("Invalid amount")
 
             elif choice == "4":
                 address = input("Enter address to check balance: ").strip()
-                with blockchain_lock:
-                    balance = blockchain.balances.get(address, 0)
+                balance = blockchain.balances.get(address, 0)
                 print(f"Balance for {address}: {balance} ALX")
 
             elif choice == "5":
-                with blockchain_lock:
-                    if not blockchain.chain:
-                        print("No blockchain initialized. Generate or register an address first (option 1 or 2).")
-                        continue
-                    for block in blockchain.chain:
-                        print(f"\nBlock {block.index}:")
-                        print(f"Hash: {block.hash}")
-                        print(f"Previous Hash: {block.previous_hash}")
-                        print("Transactions:", [vars(tx) for tx in block.transactions])
-                        print(f"Validator: {block.validator}")
-                        print(f"Timestamp: {block.timestamp}")
-                        print("---")
-                    print(f"Is chain valid? {blockchain.validate_chain()}")
+                if not blockchain.chain:
+                    print("No blockchain initialized. Generate or register an address first (option 1 or 2).")
+                    continue
+                for block in blockchain.chain:
+                    print(f"\nBlock {block.index}:")
+                    print(f"Hash: {block.hash}")
+                    print(f"Previous Hash: {block.previous_hash}")
+                    print("Transactions:", [vars(tx) for tx in block.transactions])
+                    print(f"Validator: {block.validator}")
+                    print(f"Timestamp: {block.timestamp}")
+                    print("---")
+                print(f"Is chain valid? {blockchain.validate_chain()}")
 
             elif choice == "6":
-                with blockchain_lock:
-                    if not blockchain.chain:
-                        print("No blockchain initialized. Generate or register an address first (option 1 or 2).")
-                        continue
-                    if not blockchain.public_keys:
-                        print("No validator available. Generate or register an address first (option 1 or 2).")
-                        continue
-                    validator = list(blockchain.public_keys.keys())[0]
-                    block = blockchain.mine_block(validator)
-                    if block:
-                        try:
-                            response = requests.post("https://astralix-87c3a03ccde8.herokuapp.com/add_block",
-                                                    json={"index": block.index, "previous_hash": block.previous_hash,
-                                                          "timestamp": block.timestamp,
-                                                          "transactions": [{"sender": tx.sender, "receiver": tx.receiver,
-                                                                           "amount": tx.amount, "timestamp": tx.timestamp,
-                                                                           "hash": tx.hash, "signature": tx.signature}
-                                                                          for tx in block.transactions],
-                                                          "validator": block.validator, "hash": block.hash},
-                                                    timeout=5)
-                            print(f"Sending block {block.index} to https://astralix-87c3a03ccde8.herokuapp.com/add_block")
-                            if response.status_code == 200:
-                                print("Block sent successfully to seed node")
-                            else:
-                                print(f"Failed to send block: HTTP {response.status_code}, Response: {response.text}")
-                        except Exception as e:
-                            print(f"Failed to send block: {e}")
+                if not blockchain.chain:
+                    print("No blockchain initialized. Generate or register an address first (option 1 or 2).")
+                    continue
+                if not blockchain.public_keys:
+                    print("No validator available. Generate or register an address first (option 1 or 2).")
+                    continue
+                validator = list(blockchain.public_keys.keys())[0]
+                block = blockchain.mine_block(validator)
+                if block:
+                    try:
+                        response = requests.post("https://astralix-87c3a03ccde8.herokuapp.com/add_block",
+                                                json={"index": block.index, "previous_hash": block.previous_hash,
+                                                      "timestamp": block.timestamp,
+                                                      "transactions": [{"sender": tx.sender, "receiver": tx.receiver,
+                                                                       "amount": tx.amount, "timestamp": tx.timestamp,
+                                                                       "hash": tx.hash, "signature": tx.signature}
+                                                                      for tx in block.transactions],
+                                                      "validator": block.validator, "hash": block.hash},
+                                                timeout=5)
+                        print(f"Sending block {block.index} to https://astralix-87c3a03ccde8.herokuapp.com/add_block")
+                        if response.status_code == 200:
+                            print("Block sent successfully to seed node")
+                        else:
+                            print(f"Failed to send block: HTTP {response.status_code}, Response: {response.text}")
+                    except Exception as e:
+                        print(f"Failed to send block: {e}")
 
             elif choice == "7":
                 if sync_with_seed("https://astralix-87c3a03ccde8.herokuapp.com"):
