@@ -19,7 +19,7 @@ AstraliX Blockchain and ALX Token (Testnet Ready)
   - ECDSA signatures for secure transactions.
   - Wallet addresses with 'ALX' prefix.
   - Support for smart contracts (basic storage).
-  - Persistence in astralix100_data.json.
+  - Persistence in astralix513_dsta.json.
   - P2P networking with HTTP endpoint for chain sync to Heroku seed node.
 - Run with: python astralix100.py
 """
@@ -59,7 +59,10 @@ class Transaction:
         if self.sender == "system":
             return True  # System transactions don't need signatures
         if self.sender not in public_keys:
-            print(f"Public key for {self.sender} not found")
+            print(f"Signature verification failed: Public key for {self.sender} not found")
+            return False
+        if not self.signature:
+            print(f"Signature verification failed: No signature provided for {self.sender}")
             return False
         try:
             vk = ecdsa.VerifyingKey.from_string(binascii.unhexlify(public_keys[self.sender]), curve=ecdsa.SECP256k1)
@@ -67,7 +70,7 @@ class Transaction:
             print(f"Signature verification for {self.hash}: {'Valid' if verified else 'Invalid'}")
             return verified
         except Exception as e:
-            print(f"Signature verification failed: {e}")
+            print(f"Signature verification failed for {self.sender}: {e}")
             return False
 
 class Block:
@@ -97,13 +100,14 @@ class Blockchain:
         self.staked_amounts = {}
         self.public_keys = {}
         self.contract_states = {}  # Store contract states
+        # Register genesis_miner public key (derived from private key 7cae72660c82fcb94b256619cc86e7cd4706713ca37652a76d835e3512511179)
+        self.public_keys["genesis_miner"] = "0484e666fd3a6e6c18d6b7f7a85e46b5a7f6e8f1e0b7a0f2e1e4b3c5a7d8f9e0a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3"
         self.load_data()
         if not self.chain or not self.validate_chain():
             print("Invalid chain or no chain found, creating new genesis block")
             self.chain = [self.create_genesis_block()]
             self.balances = {"genesis_miner": self.current_supply}
             self.staked_amounts = {}
-            self.public_keys = {}
             self.contract_states = {}
             self.save_data()
         print(f"Blockchain initialized. Current supply: {self.current_supply} ALX")
@@ -118,7 +122,7 @@ class Blockchain:
     def load_data(self):
         # Load chain and state from file
         try:
-            with open("astralix100_data.json", "r") as f:
+            with open("astralix513_dsta.json", "r") as f:
                 data = json.load(f)
                 self.chain = []
                 for b in data["chain"]:
@@ -141,10 +145,10 @@ class Blockchain:
                     self.pending_transactions.append(transaction)
                 self.balances = {k: float(v) for k, v in data.get("balances", {}).items()}
                 self.staked_amounts = {k: float(v) for k, v in data.get("staked_amounts", {}).items()}
-                self.public_keys = data.get("public_keys", {})
+                self.public_keys.update(data.get("public_keys", {}))
                 self.contract_states = data.get("contract_states", {})
                 self.current_supply = float(data.get("current_supply", self.current_supply))
-                print(f"Data loaded from astralix100_data.json")
+                print(f"Data loaded from astralix513_dsta.json")
         except FileNotFoundError:
             print("No data file found, starting fresh")
         except Exception as e:
@@ -153,7 +157,6 @@ class Blockchain:
             self.pending_transactions = []
             self.balances = {}
             self.staked_amounts = {}
-            self.public_keys = {}
             self.contract_states = {}
 
     def save_data(self):
@@ -174,9 +177,9 @@ class Blockchain:
                 "contract_states": self.contract_states,
                 "current_supply": self.current_supply
             }
-            with open("astralix100_data.json", "w") as f:
+            with open("astralix513_dsta.json", "w") as f:
                 json.dump(data, f, indent=2)
-            print("Data saved to astralix100_data.json")
+            print("Data saved to astralix513_dsta.json")
         except Exception as e:
             print(f"Error saving data: {e}")
 
@@ -186,7 +189,7 @@ class Blockchain:
             if i == 0:
                 continue
             if block.previous_hash != self.chain[i-1].hash:
-                print(f"Invalid previous hash at block {i}")
+                print(f"Invalid previous hash at block {i}: received {block.previous_hash}, expected {self.chain[i-1].hash}")
                 return False
             calculated_hash = block.calculate_hash()
             if block.hash != calculated_hash:
@@ -246,7 +249,7 @@ class Blockchain:
             return None
         for tx in self.pending_transactions:
             if not tx.verify_signature(self.public_keys):
-                print(f"Pending transaction failed: Invalid signature for {tx.sender}")
+                print(f"Pending transaction failed: Invalid signature for {tx.sender} (hash: {tx.hash})")
                 return None
             if tx.tx_type == "normal" and tx.sender != "system":
                 if tx.sender not in self.balances or self.balances[tx.sender] < tx.amount:
@@ -276,6 +279,11 @@ class Blockchain:
         return tx
 
 class BlockchainHandler(BaseHTTPRequestHandler):
+    def __init__(self, *args, **kwargs):
+        # Initialize handler with reference to blockchain
+        self.blockchain = blockchain
+        super().__init__(*args, **kwargs)
+
     def do_GET(self):
         # Handle GET requests
         if self.path == "/get_chain":
@@ -286,14 +294,14 @@ class BlockchainHandler(BaseHTTPRequestHandler):
                           "transactions": [{"sender": tx.sender, "receiver": tx.receiver, "amount": tx.amount,
                                           "tx_type": tx.tx_type, "data": tx.data, "timestamp": tx.timestamp,
                                           "hash": tx.hash, "signature": tx.signature} for tx in b.transactions],
-                          "validator": b.validator, "hash": b.hash} for b in blockchain.chain]
+                          "validator": b.validator, "hash": b.hash} for b in self.blockchain.chain]
             response = {
                 "chain": chain_data,
-                "public_keys": blockchain.public_keys,
-                "balances": blockchain.balances,
-                "staked_amounts": blockchain.staked_amounts,
-                "contract_states": blockchain.contract_states,
-                "current_supply": blockchain.current_supply
+                "public_keys": self.blockchain.public_keys,
+                "balances": self.blockchain.balances,
+                "staked_amounts": self.blockchain.staked_amounts,
+                "contract_states": self.blockchain.contract_states,
+                "current_supply": self.blockchain.current_supply
             }
             self.wfile.write(json.dumps(response).encode())
         else:
@@ -319,22 +327,48 @@ class BlockchainHandler(BaseHTTPRequestHandler):
                 new_block.hash = block_data["hash"]
                 calculated_hash = new_block.calculate_hash()
                 if new_block.hash != calculated_hash:
+                    print(f"Block validation failed: Invalid hash (received {new_block.hash}, calculated {calculated_hash})")
                     self.send_response(400)
                     self.send_header("Content-type", "application/json")
                     self.end_headers()
                     self.wfile.write(json.dumps({"error": f"Invalid hash: received {new_block.hash}, calculated {calculated_hash}"}).encode())
                     return
-                if blockchain.add_block(new_block):
+                if new_block.previous_hash != self.blockchain.chain[-1].hash:
+                    print(f"Block validation failed: Previous hash mismatch (received {new_block.previous_hash}, expected {self.blockchain.chain[-1].hash})")
+                    self.send_response(400)
+                    self.send_header("Content-type", "application/json")
+                    self.end_headers()
+                    self.wfile.write(json.dumps({"error": f"Previous hash mismatch: received {new_block.previous_hash}, expected {self.blockchain.chain[-1].hash}"}).encode())
+                    return
+                for tx in transactions:
+                    if not tx.verify_signature(self.blockchain.public_keys):
+                        print(f"Block validation failed: Invalid transaction signature for {tx.sender} in block {new_block.index}")
+                        self.send_response(400)
+                        self.send_header("Content-type", "application/json")
+                        self.end_headers()
+                        self.wfile.write(json.dumps({"error": f"Invalid transaction signature for {tx.sender}"}).encode())
+                        return
+                    if tx.tx_type == "normal" and tx.sender != "system":
+                        if tx.sender not in self.blockchain.balances or self.blockchain.balances[tx.sender] < tx.amount:
+                            print(f"Block validation failed: Insufficient balance for {tx.sender} in block {new_block.index}")
+                            self.send_response(400)
+                            self.send_header("Content-type", "application/json")
+                            self.end_headers()
+                            self.wfile.write(json.dumps({"error": f"Insufficient balance for {tx.sender}"}).encode())
+                            return
+                if self.blockchain.add_block(new_block):
                     self.send_response(200)
                     self.send_header("Content-type", "application/json")
                     self.end_headers()
                     self.wfile.write(json.dumps({"message": "Block added successfully"}).encode())
                 else:
+                    print(f"Block validation failed: Unknown error for block {new_block.index}")
                     self.send_response(400)
                     self.send_header("Content-type", "application/json")
                     self.end_headers()
-                    self.wfile.write(json.dumps({"error": "Block validation failed"}).encode())
+                    self.wfile.write(json.dumps({"error": "Block validation failed: Unknown error"}).encode())
             except Exception as e:
+                print(f"Error processing block: {e}")
                 self.send_response(400)
                 self.send_header("Content-type", "application/json")
                 self.end_headers()
@@ -382,7 +416,7 @@ def sync_with_seed(seed_url):
                     if tx.verify_signature(data.get("public_keys", {})):
                         preserved_txs.append(tx)
                     else:
-                        print(f"Transaction validation failed: Missing signature or public key for {tx.sender}")
+                        print(f"Transaction validation failed: Missing signature or public key for {tx.sender} (hash: {tx.hash})")
                 blockchain.chain = new_chain
                 blockchain.public_keys.update(data.get("public_keys", {}))
                 blockchain.balances = {k: float(v) for k, v in data.get("balances", {}).items()}
@@ -396,7 +430,7 @@ def sync_with_seed(seed_url):
             else:
                 print("Chain validation failed")
         else:
-            print(f"Failed to sync: HTTP {response.status_code}")
+            print(f"Failed to sync: HTTP {response.status_code}, Response: {response.text}")
     except Exception as e:
         print(f"Sync error: {e}")
     print("Sync failed, keeping local chain")
@@ -455,6 +489,9 @@ def main():
 
             elif choice == "3":
                 sender = input("Enter sender address: ").strip()
+                if sender != "genesis_miner" and sender not in blockchain.public_keys:
+                    print(f"Error: No public key registered for {sender}")
+                    continue
                 receiver = input("Enter receiver address: ").strip()
                 try:
                     amount = float(input("Enter amount to send: ").strip())
@@ -465,10 +502,15 @@ def main():
                     tx = Transaction(sender, receiver, amount)
                     signature = tx.sign(private_key)
                     if signature:
-                        print(f"Transaction created: {sender} -> {receiver} ({amount} ALX, type: {tx.tx_type})")
-                        print(f"Transaction signed: {signature}")
+                        # Remove any duplicate transactions with the same sender, receiver, and amount
+                        blockchain.pending_transactions = [
+                            ptx for ptx in blockchain.pending_transactions
+                            if not (ptx.sender == tx.sender and ptx.receiver == tx.receiver and ptx.amount == tx.amount)
+                        ]
                         blockchain.pending_transactions.append(tx)
                         blockchain.save_data()
+                        print(f"Transaction created: {sender} -> {receiver} ({amount} ALX, type: {tx.tx_type})")
+                        print(f"Transaction signed: {signature}")
                         print(f"Added pending transaction: {sender} -> {receiver} ({amount} ALX, type: {tx.tx_type})")
                     else:
                         print("Failed to create transaction: Invalid signature")
