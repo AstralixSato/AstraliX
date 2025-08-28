@@ -19,7 +19,7 @@ AstraliX Blockchain and ALX Token (Testnet Ready)
   - ECDSA signatures for secure transactions.
   - Wallet addresses with 'ALX' prefix.
   - Persistence in astralix513_data.json.
-  - P2P networking with HTTP endpoint for chain sync to Heroku seed node.
+  - P2P networking with HTTP endpoints for chain sync to Heroku seed node.
 - Run with: python astralix100.py
 """
 
@@ -187,6 +187,36 @@ class Blockchain:
             print(f"Error validating chain: {e}")
             return False
 
+    def replace_chain(self, new_chain):
+        try:
+            temp_blockchain = Blockchain()
+            temp_blockchain.chain = new_chain
+            if temp_blockchain.validate_chain():
+                if len(new_chain) > len(self.chain):
+                    self.chain = new_chain
+                    self.balances = {}
+                    self.public_keys = {}
+                    self.private_keys = {}
+                    for block in self.chain:
+                        for tx in block.transactions:
+                            if tx.sender != "system":
+                                self.balances[tx.sender] = self.balances.get(tx.sender, 0) - tx.amount
+                            self.balances[tx.receiver] = self.balances.get(tx.receiver, 0) + tx.amount
+                        self.balances[block.validator] = self.balances.get(block.validator, 0) + 10.0
+                    self.current_supply = sum(self.balances.values())
+                    self.save_data()
+                    print("Chain replaced successfully")
+                    return True
+                else:
+                    print("New chain is not longer than current chain")
+                    return False
+            else:
+                print("New chain validation failed")
+                return False
+        except Exception as e:
+            print(f"Error replacing chain: {e}")
+            return False
+
     def add_block(self, block):
         try:
             if block.previous_hash != self.chain[-1].hash:
@@ -277,7 +307,7 @@ class BlockchainHandler(BaseHTTPRequestHandler):
                 }
                 response_json = json.dumps(response)
                 self.wfile.write(response_json.encode())
-                logging.info(f"Successfully sent chain data: {response_json}")
+                logging.info(f"Successfully sent chain data: {response_json[:100]}...")
             except Exception as e:
                 logging.error(f"Error in do_GET: {str(e)}")
                 self.send_response(500)
@@ -316,11 +346,49 @@ class BlockchainHandler(BaseHTTPRequestHandler):
                     self.wfile.write(json.dumps({"error": "Block validation failed"}).encode())
                     logging.error("Block validation failed")
             except Exception as e:
-                logging.error(f"Error in do_POST: {str(e)}")
+                logging.error(f"Error in do_POST /add_block: {str(e)}")
                 self.send_response(400)
                 self.send_header("Content-type", "application/json")
                 self.end_headers()
                 self.wfile.write(json.dumps({"error": f"Invalid block data: {str(e)}"}).encode())
+        elif self.path == "/replace_chain":
+            content_length = int(self.headers["Content-Length"])
+            post_data = self.rfile.read(content_length)
+            try:
+                data = json.loads(post_data.decode())
+                new_chain = []
+                for b in data["chain"]:
+                    transactions = []
+                    for tx in b["transactions"]:
+                        transaction = Transaction(tx["sender"], tx["receiver"], tx["amount"], tx["timestamp"])
+                        transaction.hash = tx["hash"]
+                        transaction.signature = tx["signature"]
+                        transactions.append(transaction)
+                    block = Block(b["index"], b["previous_hash"], b["timestamp"], transactions, b["validator"])
+                    block.hash = b["hash"]
+                    new_chain.append(block)
+                if self.blockchain.replace_chain(new_chain):
+                    self.blockchain.public_keys.update(data.get("public_keys", {}))
+                    self.blockchain.private_keys.update(data.get("private_keys", {}))
+                    self.blockchain.balances = {k: float(v) for k, v in data.get("balances", {}).items()}
+                    self.blockchain.current_supply = float(data.get("current_supply", self.blockchain.current_supply))
+                    self.send_response(200)
+                    self.send_header("Content-type", "application/json")
+                    self.end_headers()
+                    self.wfile.write(json.dumps({"message": "Chain replaced successfully"}).encode())
+                    logging.info("Chain replaced successfully")
+                else:
+                    self.send_response(400)
+                    self.send_header("Content-type", "application/json")
+                    self.end_headers()
+                    self.wfile.write(json.dumps({"error": "Chain replacement failed"}).encode())
+                    logging.error("Chain replacement failed")
+            except Exception as e:
+                logging.error(f"Error in do_POST /replace_chain: {str(e)}")
+                self.send_response(400)
+                self.send_header("Content-type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps({"error": f"Invalid chain data: {str(e)}"}).encode())
         else:
             self.send_response(404)
             self.end_headers()
@@ -356,8 +424,35 @@ def sync_with_seed(seed_url):
                 print(f"Response was: {response.text}")
                 return False
             if not data.get("chain"):
-                print("Seed node returned empty chain, preserving local chain")
-                return False
+                if blockchain.chain and blockchain.validate_chain():
+                    print("Seed node chain is empty, pushing local chain to seed node")
+                    chain_data = [{"index": b.index, "previous_hash": b.previous_hash, "timestamp": b.timestamp,
+                                  "transactions": [{"sender": tx.sender, "receiver": tx.receiver, "amount": tx.amount,
+                                                   "timestamp": tx.timestamp, "hash": tx.hash, "signature": tx.signature}
+                                                  for tx in b.transactions],
+                                  "validator": b.validator, "hash": b.hash} for b in blockchain.chain]
+                    try:
+                        response = requests.post(f"{seed_url}/replace_chain",
+                                                json={
+                                                    "chain": chain_data,
+                                                    "public_keys": blockchain.public_keys,
+                                                    "private_keys": blockchain.private_keys,
+                                                    "balances": blockchain.balances,
+                                                    "current_supply": blockchain.current_supply
+                                                }, timeout=5)
+                        print(f"Pushing local chain to {seed_url}/replace_chain")
+                        if response.status_code == 200:
+                            print("Local chain successfully pushed to seed node")
+                            return True
+                        else:
+                            print(f"Failed to push local chain: HTTP {response.status_code}, Response: {response.text}")
+                            return False
+                    except Exception as e:
+                        print(f"Error pushing local chain: {e}")
+                        return False
+                else:
+                    print("Seed node returned empty chain and local chain is empty or invalid, preserving local chain")
+                    return False
             new_chain = []
             for b in data["chain"]:
                 transactions = []
@@ -385,6 +480,7 @@ def sync_with_seed(seed_url):
                 return True
             else:
                 print("Chain validation failed")
+                return False
         else:
             print(f"Failed to sync: HTTP {response.status_code}, Response: {response.text}")
     except Exception as e:
