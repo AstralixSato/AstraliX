@@ -18,7 +18,7 @@ AstraliX Blockchain and ALX Token (Testnet Ready)
   - Block reward: 10 ALX.
   - ECDSA signatures for secure transactions.
   - Wallet addresses with 'ALX' prefix.
-  - Persistence in astralix_data.json.
+  - Persistence in astralix513_data.json.
   - P2P networking with HTTP endpoint for chain sync to Heroku seed node.
 - Run with: python astralix100.py
 """
@@ -94,19 +94,10 @@ class Blockchain:
         self.pending_transactions = []
         self.balances = {}
         self.public_keys = {}
+        self.private_keys = {}
         self.load_data()
         if not self.chain or not self.validate_chain():
-            if 'DYNO' in os.environ:
-                sk = ecdsa.SigningKey.generate(curve=ecdsa.SECP256k1)
-                public_key = binascii.hexlify(sk.get_verifying_key().to_string()).decode()
-                address = self.generate_address(public_key)
-                self.public_keys[address] = public_key
-                self.chain = [self.create_genesis_block(address)]
-                self.balances[address] = self.current_supply
-                self.save_data()
-                print(f"Initialized genesis block for Heroku with address: {address}")
-            else:
-                print("Invalid chain or no chain found. Please generate or register an address to create the genesis block.")
+            print("Invalid chain or no chain found. Please generate or register an address to create the genesis block.")
         else:
             print(f"Blockchain initialized. Current supply: {self.current_supply} ALX")
 
@@ -117,7 +108,7 @@ class Blockchain:
 
     def load_data(self):
         try:
-            with open("astralix_data.json", "r") as f:
+            with open("astralix513_data.json", "r") as f:
                 data = json.load(f)
                 self.chain = []
                 for b in data["chain"]:
@@ -138,7 +129,8 @@ class Blockchain:
                     self.pending_transactions.append(transaction)
                 self.balances = {k: float(v) for k, v in data.get("balances", {}).items()}
                 self.public_keys = {k: v for k, v in data.get("public_keys", {}).items()}
-                print(f"Data loaded from astralix_data.json")
+                self.private_keys = {k: v for k, v in data.get("private_keys", {}).items()}
+                print(f"Data loaded from astralix513_data.json")
         except FileNotFoundError:
             print("No data file found, starting fresh")
         except Exception as e:
@@ -147,6 +139,7 @@ class Blockchain:
             self.pending_transactions = []
             self.balances = {}
             self.public_keys = {}
+            self.private_keys = {}
 
     def save_data(self):
         try:
@@ -161,13 +154,13 @@ class Blockchain:
                                        for tx in self.pending_transactions],
                 "balances": self.balances,
                 "public_keys": self.public_keys,
-                "current_supply": self.current_supply
+                "private_keys": self.private_keys
             }
-            with open("astralix_data.json", "w") as f:
+            with open("astralix513_data.json", "w") as f:
                 json.dump(data, f, indent=2)
-                f.flush()  # Forzar escritura al disco
-                os.fsync(f.fileno())  # Asegurar que los datos se escriban
-            print("Data saved to astralix_data.json")
+                f.flush()
+                os.fsync(f.fileno())
+            print("Data saved to astralix513_data.json")
         except Exception as e:
             print(f"Error saving data: {e}")
             logging.error(f"Error saving data: {e}")
@@ -278,6 +271,7 @@ class BlockchainHandler(BaseHTTPRequestHandler):
                 response = {
                     "chain": chain_data,
                     "public_keys": self.blockchain.public_keys,
+                    "private_keys": self.blockchain.private_keys,
                     "balances": self.blockchain.balances,
                     "current_supply": self.blockchain.current_supply
                 }
@@ -382,6 +376,7 @@ def sync_with_seed(seed_url):
                 print("Chain validation passed")
                 blockchain.chain = new_chain
                 blockchain.public_keys.update(data.get("public_keys", {}))
+                blockchain.private_keys.update(data.get("private_keys", {}))
                 blockchain.balances = {k: float(v) for k, v in data.get("balances", blockchain.balances).items()}
                 blockchain.current_supply = float(data.get("current_supply", blockchain.current_supply))
                 blockchain.pending_transactions = []
@@ -430,6 +425,7 @@ def main():
                     public_key = binascii.hexlify(sk.get_verifying_key().to_string()).decode()
                     address = blockchain.generate_address(public_key)
                     blockchain.public_keys[address] = public_key
+                    blockchain.private_keys[address] = private_key
                     if not blockchain.chain:
                         blockchain.chain = [blockchain.create_genesis_block(address)]
                         blockchain.balances[address] = blockchain.current_supply
