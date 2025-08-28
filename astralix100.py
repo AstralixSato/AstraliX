@@ -130,6 +130,7 @@ class Blockchain:
                 self.balances = {k: float(v) for k, v in data.get("balances", {}).items()}
                 self.public_keys = {k: v for k, v in data.get("public_keys", {}).items()}
                 self.private_keys = {k: v for k, v in data.get("private_keys", {}).items()}
+                self.current_supply = float(data.get("current_supply", self.current_supply))
                 print(f"Data loaded from astralix513_data.json")
         except FileNotFoundError:
             print("No data file found, starting fresh")
@@ -154,7 +155,8 @@ class Blockchain:
                                        for tx in self.pending_transactions],
                 "balances": self.balances,
                 "public_keys": self.public_keys,
-                "private_keys": self.private_keys
+                "private_keys": self.private_keys,
+                "current_supply": self.current_supply
             }
             with open("astralix513_data.json", "w") as f:
                 json.dump(data, f, indent=2)
@@ -195,14 +197,13 @@ class Blockchain:
                 if len(new_chain) > len(self.chain):
                     self.chain = new_chain
                     self.balances = {}
-                    self.public_keys = {}
-                    self.private_keys = {}
                     for block in self.chain:
                         for tx in block.transactions:
                             if tx.sender != "system":
                                 self.balances[tx.sender] = self.balances.get(tx.sender, 0) - tx.amount
                             self.balances[tx.receiver] = self.balances.get(tx.receiver, 0) + tx.amount
-                        self.balances[block.validator] = self.balances.get(block.validator, 0) + 10.0
+                        if block.index > 0:  # Genesis block does not have a reward
+                            self.balances[block.validator] = self.balances.get(block.validator, 0) + 10.0
                     self.current_supply = sum(self.balances.values())
                     self.save_data()
                     print("Chain replaced successfully")
@@ -239,8 +240,9 @@ class Blockchain:
                 if tx.sender != "system":
                     self.balances[tx.sender] = self.balances.get(tx.sender, 0) - tx.amount
                 self.balances[tx.receiver] = self.balances.get(tx.receiver, 0) + tx.amount
-            self.balances[block.validator] = self.balances.get(block.validator, 0) + 10.0
-            self.current_supply += 10.0
+            if block.index > 0:  # Genesis block does not have a reward
+                self.balances[block.validator] = self.balances.get(block.validator, 0) + 10.0
+                self.current_supply += 10.0
             self.save_data()
             print(f"Block {block.index} added successfully")
             return True
@@ -302,7 +304,7 @@ class BlockchainHandler(BaseHTTPRequestHandler):
                     "chain": chain_data,
                     "public_keys": self.blockchain.public_keys,
                     "private_keys": self.blockchain.private_keys,
-                    "balances": self.blockchain.balances,
+                    "balances": self.balances,
                     "current_supply": self.blockchain.current_supply
                 }
                 response_json = json.dumps(response)
@@ -548,6 +550,48 @@ def main():
                         blockchain.save_data()
                         print(f"Genesis block created with address: {address}")
                     else:
+                        transfer_initial = input(f"Do you want to transfer the initial supply to {address}? (y/n): ").strip().lower()
+                        if transfer_initial == 'y':
+                            genesis_address = None
+                            for addr, balance in blockchain.balances.items():
+                                if balance >= blockchain.current_supply:
+                                    genesis_address = addr
+                                    break
+                            if genesis_address and genesis_address in blockchain.private_keys:
+                                tx = Transaction(genesis_address, address, blockchain.current_supply)
+                                private_key = blockchain.private_keys[genesis_address]
+                                signature = tx.sign(private_key, blockchain.public_keys[genesis_address])
+                                if signature:
+                                    blockchain.pending_transactions.append(tx)
+                                    blockchain.save_data()
+                                    print(f"Transaction created to transfer {blockchain.current_supply} ALX from {genesis_address} to {address}")
+                                    print(f"Transaction signed: {signature}")
+                                    validator = address
+                                    block = blockchain.mine_block(validator)
+                                    if block:
+                                        try:
+                                            response = requests.post("https://astralix-87c3a03ccde8.herokuapp.com/add_block",
+                                                                    json={"index": block.index, "previous_hash": block.previous_hash,
+                                                                          "timestamp": block.timestamp,
+                                                                          "transactions": [{"sender": tx.sender, "receiver": tx.receiver,
+                                                                                           "amount": tx.amount, "timestamp": tx.timestamp,
+                                                                                           "hash": tx.hash, "signature": tx.signature}
+                                                                                          for tx in block.transactions],
+                                                                          "validator": block.validator, "hash": block.hash},
+                                                                    timeout=5)
+                                            print(f"Sending block {block.index} to https://astralix-87c3a03ccde8.herokuapp.com/add_block")
+                                            if response.status_code == 200:
+                                                print("Block sent successfully to seed node")
+                                            else:
+                                                print(f"Failed to send block: HTTP {response.status_code}, Response: {response.text}")
+                                        except Exception as e:
+                                            print(f"Failed to send block: {e}")
+                                    else:
+                                        print("Failed to mine block for initial supply transfer")
+                                else:
+                                    print("Failed to create transaction: Invalid signature or private key")
+                            else:
+                                print("No genesis address with initial supply found or no private key available")
                         blockchain.save_data()
                     print(f"Registered public key for {address}")
                 except Exception as e:
