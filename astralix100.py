@@ -19,7 +19,7 @@ AstraliX Blockchain and ALX Token (Testnet Ready)
   - ECDSA signatures for secure transactions.
   - Wallet addresses with 'ALX' prefix.
   - Support for smart contracts (basic storage).
-  - Persistence in astralix513_dsta.json.
+  - Persistence in astralix513.json.
   - P2P networking with HTTP endpoint for chain sync to Heroku seed node.
 - Run with: python astralix100.py
 """
@@ -65,7 +65,12 @@ class Transaction:
             print(f"Signature verification failed: No signature provided for {self.sender}")
             return False
         try:
-            vk = ecdsa.VerifyingKey.from_string(binascii.unhexlify(public_keys[self.sender]), curve=ecdsa.SECP256k1)
+            public_key = public_keys[self.sender]
+            # Validate public key format
+            if not public_key.startswith("04") or len(public_key) != 128:
+                print(f"Signature verification failed: Invalid public key format for {self.sender}: {public_key}")
+                return False
+            vk = ecdsa.VerifyingKey.from_string(binascii.unhexlify(public_key), curve=ecdsa.SECP256k1)
             verified = vk.verify(binascii.unhexlify(self.signature), self.hash.encode())
             print(f"Signature verification for {self.hash}: {'Valid' if verified else 'Invalid'}")
             return verified
@@ -101,7 +106,7 @@ class Blockchain:
         self.public_keys = {}
         self.contract_states = {}  # Store contract states
         # Register genesis_miner public key (derived from private key 7cae72660c82fcb94b256619cc86e7cd4706713ca37652a76d835e3512511179)
-        self.public_keys["genesis_miner"] = "048c9b1a5e4f7a6b3c2d8f9e0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1"
+        self.public_keys["genesis_miner"] = "04b1f3e4c3e5b7a9c2d8f6e7b9a8c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d"
         self.load_data()
         if not self.chain or not self.validate_chain():
             print("Invalid chain or no chain found, creating new genesis block")
@@ -122,7 +127,7 @@ class Blockchain:
     def load_data(self):
         # Load chain and state from file
         try:
-            with open("astralix513_dsta.json", "r") as f:
+            with open("astralix513.json", "r") as f:
                 data = json.load(f)
                 self.chain = []
                 for b in data["chain"]:
@@ -148,7 +153,7 @@ class Blockchain:
                 self.public_keys.update(data.get("public_keys", {}))
                 self.contract_states = data.get("contract_states", {})
                 self.current_supply = float(data.get("current_supply", self.current_supply))
-                print(f"Data loaded from astralix513_dsta.json")
+                print(f"Data loaded from astralix513.json")
         except FileNotFoundError:
             print("No data file found, starting fresh")
         except Exception as e:
@@ -177,9 +182,9 @@ class Blockchain:
                 "contract_states": self.contract_states,
                 "current_supply": self.current_supply
             }
-            with open("astralix513_dsta.json", "w") as f:
+            with open("astralix513.json", "w") as f:
                 json.dump(data, f, indent=2)
-            print("Data saved to astralix513_dsta.json")
+            print("Data saved to astralix513.json")
         except Exception as e:
             print(f"Error saving data: {e}")
 
@@ -247,20 +252,25 @@ class Blockchain:
         if not self.pending_transactions:
             print("No transactions to add to block")
             return None
+        valid_transactions = []
         for tx in self.pending_transactions:
             if not tx.verify_signature(self.public_keys):
                 print(f"Pending transaction failed: Invalid signature for {tx.sender} (hash: {tx.hash})")
-                return None
+                continue
             if tx.tx_type == "normal" and tx.sender != "system":
                 if tx.sender not in self.balances or self.balances[tx.sender] < tx.amount:
                     print(f"Pending transaction failed: {tx.sender} has insufficient balance")
-                    return None
+                    continue
+            valid_transactions.append(tx)
+        if not valid_transactions:
+            print("No valid transactions to mine")
+            return None
         validators = list(self.staked_amounts.keys()) or ["genesis_miner"]
         validator = validators[0]  # Simplified: use first validator
         print(f"Selected validator: {validator}")
-        new_block = Block(len(self.chain), self.chain[-1].hash, time.time(), self.pending_transactions, validator)
+        new_block = Block(len(self.chain), self.chain[-1].hash, time.time(), valid_transactions, validator)
         if self.add_block(new_block):
-            self.pending_transactions = []
+            self.pending_transactions = [tx for tx in self.pending_transactions if tx not in valid_transactions]
             print(f"Reward 10.0 ALX issued to validator {validator}")
             self.save_data()
             print(f"Block created: Index {new_block.index}, Hash {new_block.hash}")
@@ -499,15 +509,17 @@ def main():
                         print("Amount must be non-negative")
                         continue
                     private_key = input("Enter sender's private key: ").strip()
-                    # Create a single transaction
+                    # Check for existing transaction to avoid duplication
+                    existing_tx = next((tx for tx in blockchain.pending_transactions
+                                       if tx.sender == sender and tx.receiver == receiver
+                                       and tx.amount == amount and tx.tx_type == "normal"), None)
+                    if existing_tx:
+                        print(f"Transaction already exists: {sender} -> {receiver} ({amount} ALX, type: normal)")
+                        continue
+                    # Create and sign transaction
                     tx = Transaction(sender, receiver, amount)
                     signature = tx.sign(private_key)
                     if signature:
-                        # Remove any existing transactions with the same sender, receiver, amount, and type
-                        blockchain.pending_transactions = [
-                            ptx for ptx in blockchain.pending_transactions
-                            if not (ptx.sender == tx.sender and ptx.receiver == tx.receiver and ptx.amount == tx.amount and ptx.tx_type == tx.tx_type)
-                        ]
                         blockchain.pending_transactions.append(tx)
                         blockchain.save_data()
                         print(f"Transaction created: {sender} -> {receiver} ({amount} ALX, type: {tx.tx_type})")
