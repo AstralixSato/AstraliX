@@ -304,7 +304,7 @@ class BlockchainHandler(BaseHTTPRequestHandler):
                     "chain": chain_data,
                     "public_keys": self.blockchain.public_keys,
                     "private_keys": self.blockchain.private_keys,
-                    "balances": self.balances,
+                    "balances": self.blockchain.balances,  # Corregido: usar self.blockchain.balances
                     "current_supply": self.blockchain.current_supply
                 }
                 response_json = json.dumps(response)
@@ -335,6 +335,8 @@ class BlockchainHandler(BaseHTTPRequestHandler):
                 new_block = Block(block_data["index"], block_data["previous_hash"],
                                  block_data["timestamp"], transactions, block_data["validator"])
                 new_block.hash = block_data["hash"]
+                # Actualizar public_keys antes de validar el bloque
+                self.blockchain.public_keys.update(block_data.get("public_keys", {}))
                 if self.blockchain.add_block(new_block):
                     self.send_response(200)
                     self.send_header("Content-type", "application/json")
@@ -571,14 +573,24 @@ def main():
                                     if block:
                                         try:
                                             response = requests.post("https://astralix-87c3a03ccde8.herokuapp.com/add_block",
-                                                                    json={"index": block.index, "previous_hash": block.previous_hash,
-                                                                          "timestamp": block.timestamp,
-                                                                          "transactions": [{"sender": tx.sender, "receiver": tx.receiver,
-                                                                                           "amount": tx.amount, "timestamp": tx.timestamp,
-                                                                                           "hash": tx.hash, "signature": tx.signature}
-                                                                                          for tx in block.transactions],
-                                                                          "validator": block.validator, "hash": block.hash},
-                                                                    timeout=5)
+                                                                    json={
+                                                                        "index": block.index,
+                                                                        "previous_hash": block.previous_hash,
+                                                                        "timestamp": block.timestamp,
+                                                                        "transactions": [
+                                                                            {
+                                                                                "sender": tx.sender,
+                                                                                "receiver": tx.receiver,
+                                                                                "amount": tx.amount,
+                                                                                "timestamp": tx.timestamp,
+                                                                                "hash": tx.hash,
+                                                                                "signature": tx.signature
+                                                                            } for tx in block.transactions
+                                                                        ],
+                                                                        "validator": block.validator,
+                                                                        "hash": block.hash,
+                                                                        "public_keys": blockchain.public_keys  # Enviar claves públicas
+                                                                    }, timeout=5)
                                             print(f"Sending block {block.index} to https://astralix-87c3a03ccde8.herokuapp.com/add_block")
                                             if response.status_code == 200:
                                                 print("Block sent successfully to seed node")
@@ -655,14 +667,24 @@ def main():
                 if block:
                     try:
                         response = requests.post("https://astralix-87c3a03ccde8.herokuapp.com/add_block",
-                                                json={"index": block.index, "previous_hash": block.previous_hash,
-                                                      "timestamp": block.timestamp,
-                                                      "transactions": [{"sender": tx.sender, "receiver": tx.receiver,
-                                                                       "amount": tx.amount, "timestamp": tx.timestamp,
-                                                                       "hash": tx.hash, "signature": tx.signature}
-                                                                      for tx in block.transactions],
-                                                      "validator": block.validator, "hash": block.hash},
-                                                timeout=5)
+                                                json={
+                                                    "index": block.index,
+                                                    "previous_hash": block.previous_hash,
+                                                    "timestamp": block.timestamp,
+                                                    "transactions": [
+                                                        {
+                                                            "sender": tx.sender,
+                                                            "receiver": tx.receiver,
+                                                            "amount": tx.amount,
+                                                            "timestamp": tx.timestamp,
+                                                            "hash": tx.hash,
+                                                            "signature": tx.signature
+                                                        } for tx in block.transactions
+                                                    ],
+                                                    "validator": block.validator,
+                                                    "hash": block.hash,
+                                                    "public_keys": blockchain.public_keys  # Enviar claves públicas
+                                                }, timeout=5)
                         print(f"Sending block {block.index} to https://astralix-87c3a03ccde8.herokuapp.com/add_block")
                         if response.status_code == 200:
                             print("Block sent successfully to seed node")
