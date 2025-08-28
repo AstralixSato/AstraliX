@@ -6,7 +6,9 @@ import ecdsa
 import binascii
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import threading
+import socketserver
 import os
+import sys
 from contextlib import redirect_stdout
 import logging
 
@@ -249,21 +251,29 @@ class BlockchainHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path == "/get_chain":
-            self.send_response(200)
-            self.send_header("Content-type", "application/json")
-            self.end_headers()
-            chain_data = [{"index": b.index, "previous_hash": b.previous_hash, "timestamp": b.timestamp,
-                          "transactions": [{"sender": tx.sender, "receiver": tx.receiver, "amount": tx.amount,
-                                           "timestamp": tx.timestamp, "hash": tx.hash, "signature": tx.signature}
-                                          for tx in b.transactions],
-                          "validator": b.validator, "hash": b.hash} for b in self.blockchain.chain]
-            response = {
-                "chain": chain_data,
-                "public_keys": self.blockchain.public_keys,
-                "balances": self.balances,
-                "current_supply": self.blockchain.current_supply
-            }
-            self.wfile.write(json.dumps(response).encode())
+            try:
+                self.send_response(200)
+                self.send_header("Content-type", "application/json")
+                self.end_headers()
+                chain_data = [{"index": b.index, "previous_hash": b.previous_hash, "timestamp": b.timestamp,
+                              "transactions": [{"sender": tx.sender, "receiver": tx.receiver, "amount": tx.amount,
+                                               "timestamp": tx.timestamp, "hash": tx.hash, "signature": tx.signature}
+                                              for tx in b.transactions],
+                              "validator": b.validator, "hash": b.hash} for b in self.blockchain.chain]
+                response = {
+                    "chain": chain_data,
+                    "public_keys": self.blockchain.public_keys,
+                    "balances": self.blockchain.balances,
+                    "current_supply": self.blockchain.current_supply
+                }
+                self.wfile.write(json.dumps(response).encode())
+                logging.info("Successfully sent chain data")
+            except Exception as e:
+                logging.error(f"Error in do_GET: {e}")
+                self.send_response(500)
+                self.send_header("Content-type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps({"error": f"Server error: {str(e)}"}).encode())
         else:
             self.send_response(404)
             self.end_headers()
@@ -317,12 +327,14 @@ def run_server(port=5000):
             server.serve_forever()
     except Exception as e:
         logging.error(f"Error starting HTTP server: {e}")
+        print(f"Error starting HTTP server: {e}")
         raise
 
 def sync_with_seed(seed_url):
     try:
         print(f"Attempting to sync with {seed_url}/get_chain")
-        response = requests.get(f"{seed_url}/get_chain", timeout=10)
+        response = requests.get(f"{seed_url}/get_chain", timeout=20)
+        print(f"Received response with status code: {response.status_code}")
         if response.status_code == 200:
             data = response.json()
             new_chain = []
@@ -367,7 +379,6 @@ def sync_with_seed(seed_url):
 def main():
     global blockchain
     blockchain = Blockchain()
-    print("Blockchain initialized. Current supply:", blockchain.current_supply, "ALX")
     if 'DYNO' in os.environ:
         try:
             run_server(port=int(os.getenv("PORT", 5000)))
@@ -465,7 +476,7 @@ def main():
                                                                        "hash": tx.hash, "signature": tx.signature}
                                                                       for tx in block.transactions],
                                                       "validator": block.validator, "hash": block.hash},
-                                                timeout=10)
+                                                timeout=20)
                         print(f"Sending block {block.index} to https://astralix-87c3a03ccde8.herokuapp.com/add_block")
                         if response.status_code == 200:
                             print("Block sent successfully to seed node")
