@@ -253,13 +253,14 @@ class BlockchainHandler(BaseHTTPRequestHandler):
                 response = {
                     "chain": chain_data,
                     "public_keys": self.blockchain.public_keys,
-                    "balances": self.balances,
+                    "balances": self.blockchain.balances,  # Cambio: Usar balances directamente
                     "current_supply": self.blockchain.current_supply
                 }
-                self.wfile.write(json.dumps(response).encode())
-                logging.info("Successfully sent chain data")
+                response_json = json.dumps(response)
+                self.wfile.write(response_json.encode())
+                logging.info(f"Successfully sent chain data: {response_json}")
             except Exception as e:
-                logging.error(f"Error in do_GET: {e}")
+                logging.error(f"Error in do_GET: {str(e)}")
                 self.send_response(500)
                 self.send_header("Content-type", "application/json")
                 self.end_headers()
@@ -288,13 +289,15 @@ class BlockchainHandler(BaseHTTPRequestHandler):
                     self.send_header("Content-type", "application/json")
                     self.end_headers()
                     self.wfile.write(json.dumps({"message": "Block added successfully"}).encode())
+                    logging.info(f"Block {new_block.index} added successfully")
                 else:
                     self.send_response(400)
                     self.send_header("Content-type", "application/json")
                     self.end_headers()
                     self.wfile.write(json.dumps({"error": "Block validation failed"}).encode())
+                    logging.error("Block validation failed")
             except Exception as e:
-                print(f"Error processing block: {e}")
+                logging.error(f"Error in do_POST: {str(e)}")
                 self.send_response(400)
                 self.send_header("Content-type", "application/json")
                 self.end_headers()
@@ -325,8 +328,17 @@ def sync_with_seed(seed_url):
         print(f"Attempting to sync with {seed_url}/get_chain")
         response = requests.get(f"{seed_url}/get_chain", timeout=5)
         print(f"Received response with status code: {response.status_code}")
+        print(f"Response content: {response.text}")  # Cambio: Imprimir el contenido de la respuesta
         if response.status_code == 200:
-            data = response.json()
+            try:
+                data = response.json()
+            except json.JSONDecodeError as e:
+                print(f"JSON decode error: {e}")
+                print(f"Response was: {response.text}")
+                return False
+            if not data.get("chain"):  # Cambio: Manejar caso de cadena vacía
+                print("Seed node returned empty chain, preserving local chain")
+                return False
             new_chain = []
             for b in data["chain"]:
                 transactions = []
@@ -350,7 +362,7 @@ def sync_with_seed(seed_url):
                     else:
                         print(f"Transaction validation failed: Invalid signature for {tx.sender} (hash: {tx.hash})")
                 blockchain.chain = new_chain
-                blockchain.public_keys.update(data.get("public_keys", blockchain.public_keys))
+                blockchain.public_keys.update(data.get("public_keys", {}))
                 blockchain.balances = {k: float(v) for k, v in data.get("balances", blockchain.balances).items()}
                 blockchain.current_supply = float(data.get("current_supply", blockchain.current_supply))
                 blockchain.pending_transactions = preserved_txs
@@ -371,13 +383,13 @@ def main():
     blockchain = Blockchain()
     if 'DYNO' in os.environ:
         try:
-            run_server(port=int(os.getenv("PORT", 5000)))
+            port = int(os.getenv("PORT", 5000))
+            run_server(port=port)
         except Exception as e:
             print(f"Error starting HTTP server on Heroku: {e}")
             raise
     else:
         # Desactivar el servidor local para evitar congelamiento en Termux
-        # threading.Thread(target=run_server, daemon=True).start()
         print("Local HTTP server disabled to prevent freezing. Enable it later if needed.")
         while True:
             if not blockchain.public_keys and not blockchain.chain:
