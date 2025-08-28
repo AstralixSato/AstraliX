@@ -39,9 +39,13 @@ class Transaction:
         tx_string = f"{self.sender}{self.receiver}{self.amount}{self.timestamp}"
         return hashlib.sha256(tx_string.encode()).hexdigest()
 
-    def sign(self, private_key):
+    def sign(self, private_key, public_key):
         try:
             sk = ecdsa.SigningKey.from_string(binascii.unhexlify(private_key), curve=ecdsa.SECP256k1)
+            expected_public_key = binascii.hexlify(sk.get_verifying_key().to_string()).decode()
+            if expected_public_key != public_key:
+                print(f"Error: Private key does not match public key for {self.sender}")
+                return None
             tx_hash = self.calculate_hash()
             self.signature = binascii.hexlify(sk.sign(tx_hash.encode())).decode()
             print(f"Transaction signed: {self.signature}")
@@ -92,7 +96,7 @@ class Blockchain:
         self.public_keys = {}
         self.load_data()
         if not self.chain or not self.validate_chain():
-            print("Invalid chain or no chain found. Please generate an address to create the genesis block.")
+            print("Invalid chain or no chain found. Please generate or register an address to create the genesis block.")
         else:
             print(f"Blockchain initialized. Current supply: {self.current_supply} ALX")
 
@@ -123,7 +127,7 @@ class Blockchain:
                     transaction.signature = tx["signature"]
                     self.pending_transactions.append(transaction)
                 self.balances = {k: float(v) for k, v in data.get("balances", {}).items()}
-                self.public_keys.update(data.get("public_keys", {}))
+                self.public_keys = {k: v for k, v in data.get("public_keys", {}).items()}
                 print(f"Data loaded from astralix513.json")
         except FileNotFoundError:
             print("No data file found, starting fresh")
@@ -132,6 +136,7 @@ class Blockchain:
             self.chain = []
             self.pending_transactions = []
             self.balances = {}
+            self.public_keys = {}
 
     def save_data(self):
         try:
@@ -248,7 +253,7 @@ class BlockchainHandler(BaseHTTPRequestHandler):
                 response = {
                     "chain": chain_data,
                     "public_keys": self.blockchain.public_keys,
-                    "balances": self.blockchain.balances,
+                    "balances": self.balances,
                     "current_supply": self.blockchain.current_supply
                 }
                 self.wfile.write(json.dumps(response).encode())
@@ -345,8 +350,8 @@ def sync_with_seed(seed_url):
                     else:
                         print(f"Transaction validation failed: Invalid signature for {tx.sender} (hash: {tx.hash})")
                 blockchain.chain = new_chain
-                blockchain.public_keys.update(data.get("public_keys", {}))
-                blockchain.balances = {k: float(v) for k, v in data.get("balances", {}).items()}
+                blockchain.public_keys.update(data.get("public_keys", blockchain.public_keys))
+                blockchain.balances = {k: float(v) for k, v in data.get("balances", blockchain.balances).items()}
                 blockchain.current_supply = float(data.get("current_supply", blockchain.current_supply))
                 blockchain.pending_transactions = preserved_txs
                 blockchain.save_data()
@@ -376,7 +381,7 @@ def main():
         print("Local HTTP server disabled to prevent freezing. Enable it later if needed.")
         while True:
             if not blockchain.public_keys and not blockchain.chain:
-                print("\nNo addresses registered. Please generate an address (option 1) to initialize the blockchain.")
+                print("\nNo addresses registered. Please generate or register an address (option 1 or 2) to initialize the blockchain.")
             print("\n=== AstraliX Blockchain Interface ===")
             print("1. Generate new key pair and address")
             print("2. Register public key (manual)")
@@ -409,23 +414,28 @@ def main():
             elif choice == "2":
                 address = input("Enter address: ").strip()
                 public_key = input("Enter public key: ").strip()
-                blockchain.public_keys[address] = public_key
-                if not blockchain.chain:
-                    blockchain.chain = [blockchain.create_genesis_block(address)]
-                    blockchain.balances[address] = blockchain.current_supply
-                    blockchain.save_data()
-                    print(f"Genesis block created with address: {address}")
-                else:
-                    blockchain.save_data()
-                print(f"Registered public key for {address}")
+                try:
+                    # Verificar que la clave pública sea válida
+                    ecdsa.VerifyingKey.from_string(binascii.unhexlify(public_key), curve=ecdsa.SECP256k1)
+                    blockchain.public_keys[address] = public_key
+                    if not blockchain.chain:
+                        blockchain.chain = [blockchain.create_genesis_block(address)]
+                        blockchain.balances[address] = blockchain.current_supply
+                        blockchain.save_data()
+                        print(f"Genesis block created with address: {address}")
+                    else:
+                        blockchain.save_data()
+                    print(f"Registered public key for {address}")
+                except Exception as e:
+                    print(f"Error: Invalid public key format: {e}")
 
             elif choice == "3":
                 if not blockchain.public_keys:
-                    print("Error: No addresses registered. Generate an address first (option 1).")
+                    print("Error: No addresses registered. Generate or register an address first (option 1 or 2).")
                     continue
                 sender = input("Enter sender address: ").strip()
                 if sender not in blockchain.public_keys:
-                    print(f"Error: No public key registered for {sender}")
+                    print(f"Error: No public key registered for {sender}. Register it first (option 2).")
                     continue
                 receiver = input("Enter receiver address: ").strip()
                 try:
@@ -434,21 +444,15 @@ def main():
                         print("Amount must be positive")
                         continue
                     private_key = input("Enter sender's private key: ").strip()
-                    existing_tx = next((tx for tx in blockchain.pending_transactions
-                                       if tx.sender == sender and tx.receiver == receiver
-                                       and tx.amount == amount), None)
-                    if existing_tx:
-                        print(f"Transaction already exists: {sender} -> {receiver} ({amount} ALX)")
-                        continue
                     tx = Transaction(sender, receiver, amount)
-                    signature = tx.sign(private_key)
+                    signature = tx.sign(private_key, blockchain.public_keys[sender])
                     if signature:
                         blockchain.pending_transactions.append(tx)
                         blockchain.save_data()
                         print(f"Transaction created: {sender} -> {receiver} ({amount} ALX)")
                         print(f"Transaction signed: {signature}")
                     else:
-                        print("Failed to create transaction: Invalid signature")
+                        print("Failed to create transaction: Invalid signature or private key")
                 except ValueError:
                     print("Invalid amount")
 
@@ -459,7 +463,7 @@ def main():
 
             elif choice == "5":
                 if not blockchain.chain:
-                    print("No blockchain initialized. Generate an address first (option 1).")
+                    print("No blockchain initialized. Generate or register an address first (option 1 or 2).")
                     continue
                 for block in blockchain.chain:
                     print(f"\nBlock {block.index}:")
@@ -473,10 +477,10 @@ def main():
 
             elif choice == "6":
                 if not blockchain.chain:
-                    print("No blockchain initialized. Generate an address first (option 1).")
+                    print("No blockchain initialized. Generate or register an address first (option 1 or 2).")
                     continue
                 if not blockchain.public_keys:
-                    print("No validator available. Generate an address first (option 1).")
+                    print("No validator available. Generate or register an address first (option 1 or 2).")
                     continue
                 validator = list(blockchain.public_keys.keys())[0]  # Usar la primera dirección como validador
                 block = blockchain.mine_block(validator)
