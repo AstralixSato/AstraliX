@@ -8,6 +8,8 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 import threading
 import socketserver
 import os
+import sys
+from contextlib import redirect_stdout
 
 """
 AstraliX Blockchain and ALX Token (Testnet Ready)
@@ -18,15 +20,19 @@ AstraliX Blockchain and ALX Token (Testnet Ready)
   - Block reward: 10 ALX.
   - ECDSA signatures for secure transactions.
   - Wallet addresses with 'ALX' prefix.
-  - Support for smart contracts (basic storage).
   - Persistence in astralix513.json.
   - P2P networking with HTTP endpoint for chain sync to Heroku seed node.
 - Run with: python astralix100.py
 """
 
+# Predefined private key for genesis_miner
+GENESIS_PRIVATE_KEY = "7cae72660c82fcb94b256619cc86e7cd4706713ca37652a76d835e3512511179"
+
+# Predefined public key for genesis_miner (derived from the private key)
+GENESIS_PUBLIC_KEY = "0488e9c2f5e8c9f9e31e6c4b8a6f7e4e7f4b1c9b3e6d9b1e8c7a2f5e4d6b7c8a9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f"
+
 class Transaction:
     def __init__(self, sender, receiver, amount, tx_type="normal", data=None, timestamp=None):
-        # Initialize a transaction with sender, receiver, amount, type, data, and timestamp
         self.sender = sender
         self.receiver = receiver
         self.amount = float(amount)
@@ -35,15 +41,12 @@ class Transaction:
         self.timestamp = timestamp if timestamp is not None else time.time()
         self.hash = self.calculate_hash()
         self.signature = None
-        print(f"Transaction created: {self.sender} -> {self.receiver} ({self.amount} ALX, type: {self.tx_type})")
 
     def calculate_hash(self):
-        # Create a hash of the transaction
         tx_string = f"{self.sender}{self.receiver}{self.amount}{self.tx_type}{self.data}{self.timestamp}"
         return hashlib.sha256(tx_string.encode()).hexdigest()
 
     def sign(self, private_key):
-        # Sign transaction using sender's private key
         try:
             sk = ecdsa.SigningKey.from_string(binascii.unhexlify(private_key), curve=ecdsa.SECP256k1)
             tx_hash = self.calculate_hash()
@@ -55,9 +58,8 @@ class Transaction:
             return None
 
     def verify_signature(self, public_keys):
-        # Verify transaction signature
         if self.sender == "system":
-            return True  # System transactions don't need signatures
+            return True
         if self.sender not in public_keys:
             print(f"Signature verification failed: Public key for {self.sender} not found")
             return False
@@ -66,7 +68,6 @@ class Transaction:
             return False
         try:
             public_key = public_keys[self.sender]
-            # Validate public key format
             if not public_key.startswith("04") or len(public_key) != 128:
                 print(f"Signature verification failed: Invalid public key format for {self.sender}: {public_key}")
                 return False
@@ -74,64 +75,47 @@ class Transaction:
             verified = vk.verify(binascii.unhexlify(self.signature), self.hash.encode())
             print(f"Signature verification for {self.hash}: {'Valid' if verified else 'Invalid'}")
             return verified
-        except ecdsa.keys.BadSignatureError:
-            print(f"Signature verification failed for {self.sender}: Invalid signature")
-            return False
-        except ecdsa.keys.MalformedPointError:
-            print(f"Signature verification failed for {self.sender}: Malformed public key")
-            return False
         except Exception as e:
             print(f"Signature verification failed for {self.sender}: {e}")
             return False
 
 class Block:
     def __init__(self, index, previous_hash, timestamp, transactions, validator):
-        # Initialize block with transactions and validator address
         self.index = index
         self.previous_hash = previous_hash
         self.timestamp = timestamp
         self.transactions = transactions
         self.validator = validator
         self.hash = self.calculate_hash()
-        print(f"Block created: Index {self.index}, Hash {self.hash}")
 
     def calculate_hash(self):
-        # Calculate block hash
         tx_hashes = "".join(tx.hash for tx in self.transactions)
         block_string = f"{self.index}{self.previous_hash}{self.timestamp}{tx_hashes}{self.validator}"
         return hashlib.sha256(block_string.encode()).hexdigest()
 
 class Blockchain:
     def __init__(self):
-        # Initialize AstraliX blockchain with initial supply
-        self.current_supply = 10000000.0  # Initial supply of 10M ALX
+        self.current_supply = 10000000.0
         self.chain = []
         self.pending_transactions = []
         self.balances = {}
-        self.staked_amounts = {}
         self.public_keys = {}
-        self.contract_states = {}  # Store contract states
-        # Register genesis_miner public key (derived from private key 7cae72660c82fcb94b256619cc86e7cd4706713ca37652a76d835e3512511179)
-        self.public_keys["genesis_miner"] = "0488e9c2f5e8c9f9e31e6c4b8a6f7e4e7f4b1c9b3e6d9b1e8c7a2f5e4d6b7c8a9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f"
+        # Register genesis_miner public key
+        self.public_keys["genesis_miner"] = GENESIS_PUBLIC_KEY
         self.load_data()
         if not self.chain or not self.validate_chain():
             print("Invalid chain or no chain found, creating new genesis block")
             self.chain = [self.create_genesis_block()]
             self.balances = {"genesis_miner": self.current_supply}
-            self.staked_amounts = {}
-            self.contract_states = {}
             self.save_data()
         print(f"Blockchain initialized. Current supply: {self.current_supply} ALX")
 
     def create_genesis_block(self):
-        # Create first block with initial supply distribution
         genesis_tx = Transaction("system", "genesis_miner", self.current_supply, tx_type="normal")
-        genesis = Block(0, "0", 1756276414.6047966, [genesis_tx], "genesis_miner")
-        genesis.hash = "2ce949be2a9eb8cd69b61823043e49c5bfc4379c9a7613b004198d04aa681c45"  # Fixed hash
+        genesis = Block(0, "0", time.time(), [genesis_tx], "genesis_miner")
         return genesis
 
     def load_data(self):
-        # Load chain and state from file
         try:
             with open("astralix513.json", "r") as f:
                 data = json.load(f)
@@ -155,10 +139,7 @@ class Blockchain:
                     transaction.signature = tx["signature"]
                     self.pending_transactions.append(transaction)
                 self.balances = {k: float(v) for k, v in data.get("balances", {}).items()}
-                self.staked_amounts = {k: float(v) for k, v in data.get("staked_amounts", {}).items()}
                 self.public_keys.update(data.get("public_keys", {}))
-                self.contract_states = data.get("contract_states", {})
-                self.current_supply = float(data.get("current_supply", self.current_supply))
                 print(f"Data loaded from astralix513.json")
         except FileNotFoundError:
             print("No data file found, starting fresh")
@@ -167,8 +148,6 @@ class Blockchain:
             self.chain = []
             self.pending_transactions = []
             self.balances = {}
-            self.staked_amounts = {}
-            self.contract_states = {}
 
     def save_data(self):
         # Save chain and state to file
@@ -183,9 +162,7 @@ class Blockchain:
                                         "tx_type": tx.tx_type, "data": tx.data, "timestamp": tx.timestamp,
                                         "hash": tx.hash, "signature": tx.signature} for tx in self.pending_transactions],
                 "balances": self.balances,
-                "staked_amounts": self.staked_amounts,
                 "public_keys": self.public_keys,
-                "contract_states": self.contract_states,
                 "current_supply": self.current_supply
             }
             with open("astralix513.json", "w") as f:
@@ -236,17 +213,6 @@ class Blockchain:
                 if tx.sender != "system":
                     self.balances[tx.sender] = self.balances.get(tx.sender, 0) - tx.amount
                 self.balances[tx.receiver] = self.balances.get(tx.receiver, 0) + tx.amount
-            elif tx.tx_type == "stake":
-                self.balances[tx.sender] = self.balances.get(tx.sender, 0) - tx.amount
-                self.staked_amounts[tx.sender] = self.staked_amounts.get(tx.sender, 0) + tx.amount
-            elif tx.tx_type == "unstake":
-                self.balances[tx.sender] = self.balances.get(tx.sender, 0) + tx.amount
-                self.staked_amounts[tx.sender] = self.staked_amounts.get(tx.sender, 0) - tx.amount
-            elif tx.tx_type == "contract":
-                if tx.sender != "system":
-                    self.balances[tx.sender] = self.balances.get(tx.sender, 0) - tx.amount
-                self.balances[tx.receiver] = self.balances.get(tx.receiver, 0) + tx.amount
-                self.contract_states[tx.receiver] = tx.data
         self.balances[block.validator] = self.balances.get(block.validator, 0) + 10.0  # Mining reward
         self.current_supply += 10.0
         self.save_data()
@@ -271,8 +237,7 @@ class Blockchain:
         if not valid_transactions:
             print("No valid transactions to mine")
             return None
-        validators = list(self.staked_amounts.keys()) or ["genesis_miner"]
-        validator = validators[0]  # Simplified: use first validator
+        validator = "genesis_miner"  # Simplified validator selection
         print(f"Selected validator: {validator}")
         new_block = Block(len(self.chain), self.chain[-1].hash, time.time(), valid_transactions, validator)
         if self.add_block(new_block):
@@ -286,13 +251,6 @@ class Blockchain:
     def generate_address(self, public_key):
         # Generate a wallet address from public key
         return f"ALX{hashlib.sha256(public_key.encode()).hexdigest()[:40]}"
-
-    def deploy_contract(self, sender, bytecode, amount):
-        # Deploy a contract by creating a transaction
-        nonce = len([tx for block in self.chain for tx in block.transactions if tx.sender == sender])
-        contract_address = f"ALX{hashlib.sha256(f'{bytecode}{sender}{nonce}'.encode()).hexdigest()[:40]}"
-        tx = Transaction(sender, contract_address, amount, tx_type="contract", data=bytecode)
-        return tx
 
 class BlockchainHandler(BaseHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
