@@ -48,7 +48,7 @@ class Transaction:
             sk = ecdsa.SigningKey.from_string(binascii.unhexlify(private_key), curve=ecdsa.SECP256k1)
             tx_hash = self.calculate_hash()
             self.signature = binascii.hexlify(sk.sign(tx_hash.encode())).decode()
-            print(f"Transaction signed: {self.hash}")
+            print(f"Transaction signed: {self.signature}")
             return self.signature
         except Exception as e:
             print(f"Error signing transaction: {e}")
@@ -101,7 +101,7 @@ class Blockchain:
         self.public_keys = {}
         self.contract_states = {}  # Store contract states
         # Register genesis_miner public key (derived from private key 7cae72660c82fcb94b256619cc86e7cd4706713ca37652a76d835e3512511179)
-        self.public_keys["genesis_miner"] = "0484e666fd3a6e6c18d6b7f7a85e46b5a7f6e8f1e0b7a0f2e1e4b3c5a7d8f9e0a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3"
+        self.public_keys["genesis_miner"] = "048c9b1a5e4f7a6b3c2d8f9e0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1"
         self.load_data()
         if not self.chain or not self.validate_chain():
             print("Invalid chain or no chain found, creating new genesis block")
@@ -499,13 +499,14 @@ def main():
                         print("Amount must be non-negative")
                         continue
                     private_key = input("Enter sender's private key: ").strip()
+                    # Create a single transaction
                     tx = Transaction(sender, receiver, amount)
                     signature = tx.sign(private_key)
                     if signature:
-                        # Remove any duplicate transactions with the same sender, receiver, and amount
+                        # Remove any existing transactions with the same sender, receiver, amount, and type
                         blockchain.pending_transactions = [
                             ptx for ptx in blockchain.pending_transactions
-                            if not (ptx.sender == tx.sender and ptx.receiver == tx.receiver and ptx.amount == tx.amount)
+                            if not (ptx.sender == tx.sender and ptx.receiver == tx.receiver and ptx.amount == tx.amount and ptx.tx_type == tx.tx_type)
                         ]
                         blockchain.pending_transactions.append(tx)
                         blockchain.save_data()
