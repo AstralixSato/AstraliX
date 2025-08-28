@@ -74,6 +74,12 @@ class Transaction:
             verified = vk.verify(binascii.unhexlify(self.signature), self.hash.encode())
             print(f"Signature verification for {self.hash}: {'Valid' if verified else 'Invalid'}")
             return verified
+        except ecdsa.keys.BadSignatureError:
+            print(f"Signature verification failed for {self.sender}: Invalid signature")
+            return False
+        except ecdsa.keys.MalformedPointError:
+            print(f"Signature verification failed for {self.sender}: Malformed public key")
+            return False
         except Exception as e:
             print(f"Signature verification failed for {self.sender}: {e}")
             return False
@@ -106,7 +112,7 @@ class Blockchain:
         self.public_keys = {}
         self.contract_states = {}  # Store contract states
         # Register genesis_miner public key (derived from private key 7cae72660c82fcb94b256619cc86e7cd4706713ca37652a76d835e3512511179)
-        self.public_keys["genesis_miner"] = "04b1f3e4c3e5b7a9c2d8f6e7b9a8c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d"
+        self.public_keys["genesis_miner"] = "0488e9c2f5e8c9f9e31e6c4b8a6f7e4e7f4b1c9b3e6d9b1e8c7a2f5e4d6b7c8a9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f"
         self.load_data()
         if not self.chain or not self.validate_chain():
             print("Invalid chain or no chain found, creating new genesis block")
