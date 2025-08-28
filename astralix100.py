@@ -7,7 +7,6 @@ import binascii
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import threading
 import os
-from contextlib import redirect_stdout
 import logging
 
 """
@@ -314,6 +313,7 @@ class BlockchainHandler(BaseHTTPRequestHandler):
 def run_server(port=5000):
     try:
         if 'DYNO' not in os.environ:
+            print(f"Starting local server on port {port}, logging to astralix_server.log")
             with open('astralix_server.log', 'a') as f:
                 with redirect_stdout(f):
                     server = HTTPServer(("", port), BlockchainHandler)
@@ -331,7 +331,7 @@ def run_server(port=5000):
 def sync_with_seed(seed_url):
     try:
         print(f"Attempting to sync with {seed_url}/get_chain")
-        response = requests.get(f"{seed_url}/get_chain", timeout=20)
+        response = requests.get(f"{seed_url}/get_chain", timeout=5)
         print(f"Received response with status code: {response.status_code}")
         if response.status_code == 200:
             data = response.json()
@@ -384,7 +384,9 @@ def main():
             print(f"Error starting HTTP server on Heroku: {e}")
             raise
     else:
-        threading.Thread(target=run_server, daemon=True).start()
+        # Desactivar el servidor local temporalmente para evitar congelamiento
+        # threading.Thread(target=run_server, daemon=True).start()
+        print("Local HTTP server disabled to prevent freezing. Enable it later if needed.")
         while True:
             print("\n=== AstraliX Blockchain Interface ===")
             print("1. Generate new key pair and address")
@@ -474,7 +476,7 @@ def main():
                                                                        "hash": tx.hash, "signature": tx.signature}
                                                                       for tx in block.transactions],
                                                       "validator": block.validator, "hash": block.hash},
-                                                timeout=20)
+                                                timeout=5)
                         print(f"Sending block {block.index} to https://astralix-87c3a03ccde8.herokuapp.com/add_block")
                         if response.status_code == 200:
                             print("Block sent successfully to seed node")
