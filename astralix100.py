@@ -27,10 +27,13 @@ AstraliX Blockchain and ALX Token (Testnet Ready)
 logging.basicConfig(filename='astralix_server.log', level=logging.INFO, format='%(asctime)s - %(message)s')
 
 # Predefined private key for genesis_miner
-GENESIS_PRIVATE_KEY = "7cae72660c82fcb94b256619cc86e7cd4706713ca37652a76d835e3512511179"
+GENESIS_PRIVATE_KEY = "5d7f9e8a2b1c4d6e9f0a3b2c7d8e1f4a5b6c9d0e2f3a4b5c6d7e8f9a0b1c2d3"
 
 # Predefined public key for genesis_miner (derived from the private key)
-GENESIS_PUBLIC_KEY = "0488e9c2f5e8c9f9e31e6c4b8a6f7e4e7f4b1c9b3e6d9b1e8c7a2f5e4d6b7c8a9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f"
+GENESIS_PUBLIC_KEY = "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0"
+
+# Predefined address for genesis_miner
+GENESIS_ADDRESS = "ALX8f9e0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f"
 
 class Transaction:
     def __init__(self, sender, receiver, amount, timestamp=None):
@@ -67,7 +70,7 @@ class Transaction:
             return False
         try:
             public_key = public_keys[self.sender]
-            if not public_key.startswith("04") or len(public_key) != 128:
+            if not public_key.startswith("a1") or len(public_key) != 128:
                 print(f"Signature verification failed: Invalid public key format for {self.sender}: {public_key}")
                 return False
             vk = ecdsa.VerifyingKey.from_string(binascii.unhexlify(public_key), curve=ecdsa.SECP256k1)
@@ -98,18 +101,18 @@ class Blockchain:
         self.chain = []
         self.pending_transactions = []
         self.balances = {}
-        self.public_keys = {"genesis_miner": GENESIS_PUBLIC_KEY}
+        self.public_keys = {GENESIS_ADDRESS: GENESIS_PUBLIC_KEY}
         self.load_data()
         if not self.chain or not self.validate_chain():
             print("Invalid chain or no chain found, creating new genesis block")
             self.chain = [self.create_genesis_block()]
-            self.balances = {"genesis_miner": self.current_supply}
+            self.balances = {GENESIS_ADDRESS: self.current_supply}
             self.save_data()
         print(f"Blockchain initialized. Current supply: {self.current_supply} ALX")
 
     def create_genesis_block(self):
-        genesis_tx = Transaction("system", "genesis_miner", self.current_supply)
-        genesis = Block(0, "0", time.time(), [genesis_tx], "genesis_miner")
+        genesis_tx = Transaction("system", GENESIS_ADDRESS, self.current_supply)
+        genesis = Block(0, "0", time.time(), [genesis_tx], GENESIS_ADDRESS)
         return genesis
 
     def load_data(self):
@@ -227,7 +230,7 @@ class Blockchain:
         if not valid_transactions:
             print("No valid transactions to mine")
             return None
-        validator = "genesis_miner"
+        validator = GENESIS_ADDRESS
         print(f"Selected validator: {validator}")
         new_block = Block(len(self.chain), self.chain[-1].hash, time.time(), valid_transactions, validator)
         if self.add_block(new_block):
@@ -384,7 +387,7 @@ def main():
             print(f"Error starting HTTP server on Heroku: {e}")
             raise
     else:
-        # Desactivar el servidor local temporalmente para evitar congelamiento
+        # Desactivar el servidor local para evitar congelamiento
         # threading.Thread(target=run_server, daemon=True).start()
         print("Local HTTP server disabled to prevent freezing. Enable it later if needed.")
         while True:
@@ -420,7 +423,7 @@ def main():
 
             elif choice == "3":
                 sender = input("Enter sender address: ").strip()
-                if sender != "genesis_miner" and sender not in blockchain.public_keys:
+                if sender != GENESIS_ADDRESS and sender not in blockchain.public_keys:
                     print(f"Error: No public key registered for {sender}")
                     continue
                 receiver = input("Enter receiver address: ").strip()
