@@ -4,23 +4,33 @@ import hashlib
 import requests
 import ecdsa
 import binascii
-from aiohttp import web
+from http.server import BaseHTTPRequestHandler, HTTPServer
 import threading
+import os
+from contextlib import redirect_stdout
 import logging
-from tenacity import retry, stop_after_attempt, wait_exponential
-from inputimeout import inputimeout, TimeoutOccurred
 
 """
 AstraliX Blockchain and ALX Token (Testnet Ready)
 ==============================
 - Simplified Proof-of-Stake (PoS) blockchain with ALX token.
-- Optimized for Termux and Heroku with async server and reduced resource usage.
+- Features:
+  - Initial supply: 10M ALX.
+  - Block reward: 10 ALX.
+  - ECDSA signatures for secure transactions.
+  - Wallet addresses with 'ALX' prefix.
+  - Persistence in astralix513.json.
+  - P2P networking with HTTP endpoint for chain sync to Heroku seed node.
+- Run with: python astralix100.py
 """
 
-# Configure logging
+# Configure logging for server messages
 logging.basicConfig(filename='astralix_server.log', level=logging.INFO, format='%(asctime)s - %(message)s')
 
+# Predefined private key for genesis_miner
 GENESIS_PRIVATE_KEY = "7cae72660c82fcb94b256619cc86e7cd4706713ca37652a76d835e3512511179"
+
+# Predefined public key for genesis_miner (derived from the private key)
 GENESIS_PUBLIC_KEY = "0488e9c2f5e8c9f9e31e6c4b8a6f7e4e7f4b1c9b3e6d9b1e8c7a2f5e4d6b7c8a9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f"
 
 class Transaction:
@@ -41,29 +51,32 @@ class Transaction:
             sk = ecdsa.SigningKey.from_string(binascii.unhexlify(private_key), curve=ecdsa.SECP256k1)
             tx_hash = self.calculate_hash()
             self.signature = binascii.hexlify(sk.sign(tx_hash.encode())).decode()
-            logging.info(f"Transaction signed: {self.signature}")
+            print(f"Transaction signed: {self.signature}")
             return self.signature
         except Exception as e:
-            logging.error(f"Error signing transaction: {e}")
+            print(f"Error signing transaction: {e}")
             return None
 
     def verify_signature(self, public_keys):
         if self.sender == "system":
             return True
         if self.sender not in public_keys:
-            logging.error(f"Signature verification failed: Public key for {self.sender} not found")
+            print(f"Signature verification failed: Public key for {self.sender} not found")
             return False
         if not self.signature:
-            logging.error(f"Signature verification failed: No signature provided for {self.sender}")
+            print(f"Signature verification failed: No signature provided for {self.sender}")
             return False
         try:
             public_key = public_keys[self.sender]
+            if not public_key.startswith("04") or len(public_key) != 128:
+                print(f"Signature verification failed: Invalid public key format for {self.sender}: {public_key}")
+                return False
             vk = ecdsa.VerifyingKey.from_string(binascii.unhexlify(public_key), curve=ecdsa.SECP256k1)
             verified = vk.verify(binascii.unhexlify(self.signature), self.hash.encode())
-            logging.info(f"Signature verification for {self.hash}: {'Valid' if verified else 'Invalid'}")
+            print(f"Signature verification for {self.hash}: {'Valid' if verified else 'Invalid'}")
             return verified
         except Exception as e:
-            logging.error(f"Signature verification failed for {self.sender}: {e}")
+            print(f"Signature verification failed for {self.sender}: {e}")
             return False
 
 class Block:
@@ -89,11 +102,11 @@ class Blockchain:
         self.public_keys = {"genesis_miner": GENESIS_PUBLIC_KEY}
         self.load_data()
         if not self.chain or not self.validate_chain():
-            logging.info("Invalid chain or no chain found, creating new genesis block")
+            print("Invalid chain or no chain found, creating new genesis block")
             self.chain = [self.create_genesis_block()]
             self.balances = {"genesis_miner": self.current_supply}
             self.save_data()
-        logging.info(f"Blockchain initialized. Current supply: {self.current_supply} ALX")
+        print(f"Blockchain initialized. Current supply: {self.current_supply} ALX")
 
     def create_genesis_block(self):
         genesis_tx = Transaction("system", "genesis_miner", self.current_supply)
@@ -123,11 +136,11 @@ class Blockchain:
                     self.pending_transactions.append(transaction)
                 self.balances = {k: float(v) for k, v in data.get("balances", {}).items()}
                 self.public_keys.update(data.get("public_keys", {}))
-                logging.info("Data loaded from astralix513.json")
+                print(f"Data loaded from astralix513.json")
         except FileNotFoundError:
-            logging.info("No data file found, starting fresh")
+            print("No data file found, starting fresh")
         except Exception as e:
-            logging.error(f"Error loading data: {e}")
+            print(f"Error loading data: {e}")
             self.chain = []
             self.pending_transactions = []
             self.balances = {}
@@ -149,44 +162,43 @@ class Blockchain:
             }
             with open("astralix513.json", "w") as f:
                 json.dump(data, f, indent=2)
-            logging.info("Data saved to astralix513.json")
+            print("Data saved to astralix513.json")
         except Exception as e:
-            logging.error(f"Error saving data: {e}")
+            print(f"Error saving data: {e}")
 
     def validate_chain(self):
-        for i, block in enumerate(self.chain[-10:]):  # Validate only last 10 blocks
-            real_index = len(self.chain) - 10 + i
-            if real_index == 0:
+        for i, block in enumerate(self.chain):
+            if i == 0:
                 continue
-            if block.previous_hash != self.chain[real_index-1].hash:
-                logging.error(f"Invalid previous hash at block {real_index}")
+            if block.previous_hash != self.chain[i-1].hash:
+                print(f"Invalid previous hash at block {i}: received {block.previous_hash}, expected {self.chain[i-1].hash}")
                 return False
             calculated_hash = block.calculate_hash()
             if block.hash != calculated_hash:
-                logging.error(f"Invalid hash at block {real_index}: received {block.hash}, calculated {calculated_hash}")
+                print(f"Invalid hash at block {i}: received {block.hash}, calculated {calculated_hash}")
                 return False
             for tx in block.transactions:
                 if not tx.verify_signature(self.public_keys):
-                    logging.error(f"Invalid transaction in block {real_index}: {tx.hash}")
+                    print(f"Invalid transaction in block {i}: {tx.hash}")
                     return False
-        logging.info("Chain validation passed")
+        print("Chain validation passed")
         return True
 
     def add_block(self, block):
         if block.previous_hash != self.chain[-1].hash:
-            logging.error(f"Block {block.index} rejected: Previous hash mismatch")
+            print(f"Block {block.index} rejected: Previous hash mismatch")
             return False
         calculated_hash = block.calculate_hash()
         if block.hash != calculated_hash:
-            logging.error(f"Block {block.index} rejected: Invalid hash")
+            print(f"Block {block.index} rejected: Invalid hash")
             return False
         for tx in block.transactions:
             if not tx.verify_signature(self.public_keys):
-                logging.error(f"Block {block.index} rejected: Invalid transaction {tx.hash}")
+                print(f"Block {block.index} rejected: Invalid transaction {tx.hash}")
                 return False
             if tx.sender != "system":
                 if tx.sender not in self.balances or self.balances[tx.sender] < tx.amount:
-                    logging.error(f"Block {block.index} rejected: Insufficient balance for {tx.sender}")
+                    print(f"Block {block.index} rejected: Insufficient balance for {tx.sender}")
                     return False
         self.chain.append(block)
         for tx in block.transactions:
@@ -196,137 +208,184 @@ class Blockchain:
         self.balances[block.validator] = self.balances.get(block.validator, 0) + 10.0
         self.current_supply += 10.0
         self.save_data()
-        logging.info(f"Block {block.index} added successfully")
+        print(f"Block {block.index} added successfully")
         return True
 
     def mine_block(self):
         if not self.pending_transactions:
-            logging.info("No transactions to add to block")
+            print("No transactions to add to block")
             return None
-        valid_transactions = self.pending_transactions[:10]  # Limit to 10 transactions
-        for tx in valid_transactions:
+        valid_transactions = []
+        for tx in self.pending_transactions:
             if not tx.verify_signature(self.public_keys):
-                logging.error(f"Pending transaction failed: Invalid signature for {tx.sender} (hash: {tx.hash})")
+                print(f"Pending transaction failed: Invalid signature for {tx.sender} (hash: {tx.hash})")
                 continue
             if tx.sender != "system":
                 if tx.sender not in self.balances or self.balances[tx.sender] < tx.amount:
-                    logging.error(f"Pending transaction failed: {tx.sender} has insufficient balance")
+                    print(f"Pending transaction failed: {tx.sender} has insufficient balance")
                     continue
+            valid_transactions.append(tx)
         if not valid_transactions:
-            logging.info("No valid transactions to mine")
+            print("No valid transactions to mine")
             return None
         validator = "genesis_miner"
-        logging.info(f"Selected validator: {validator}")
+        print(f"Selected validator: {validator}")
         new_block = Block(len(self.chain), self.chain[-1].hash, time.time(), valid_transactions, validator)
         if self.add_block(new_block):
             self.pending_transactions = [tx for tx in self.pending_transactions if tx not in valid_transactions]
-            logging.info(f"Reward 10.0 ALX issued to validator {validator}")
+            print(f"Reward 10.0 ALX issued to validator {validator}")
             self.save_data()
-            logging.info(f"Block created: Index {new_block.index}, Hash {new_block.hash}")
+            print(f"Block created: Index {new_block.index}, Hash {new_block.hash}")
             return new_block
         return None
 
     def generate_address(self, public_key):
         return f"ALX{hashlib.sha256(public_key.encode()).hexdigest()[:40]}"
 
-async def handle_get_chain(request):
-    chain_data = [{"index": b.index, "previous_hash": b.previous_hash, "timestamp": b.timestamp,
-                   "transactions": [{"sender": tx.sender, "receiver": tx.receiver, "amount": tx.amount,
-                                    "timestamp": tx.timestamp, "hash": tx.hash, "signature": tx.signature}
-                                   for tx in b.transactions],
-                   "validator": b.validator, "hash": b.hash} for b in blockchain.chain]
-    response = {
-        "chain": chain_data,
-        "public_keys": blockchain.public_keys,
-        "balances": blockchain.balances,
-        "current_supply": blockchain.current_supply
-    }
-    return web.json_response(response)
+class BlockchainHandler(BaseHTTPRequestHandler):
+    def __init__(self, *args, **kwargs):
+        self.blockchain = blockchain
+        super().__init__(*args, **kwargs)
 
-async def handle_add_block(request):
-    try:
-        block_data = await request.json()
-        transactions = []
-        for tx in block_data["transactions"]:
-            transaction = Transaction(tx["sender"], tx["receiver"], tx["amount"], tx["timestamp"])
-            transaction.hash = tx["hash"]
-            transaction.signature = tx["signature"]
-            transactions.append(transaction)
-        new_block = Block(block_data["index"], block_data["previous_hash"],
-                         block_data["timestamp"], transactions, block_data["validator"])
-        new_block.hash = block_data["hash"]
-        if blockchain.add_block(new_block):
-            return web.json_response({"message": "Block added successfully"})
+    def do_GET(self):
+        if self.path == "/get_chain":
+            try:
+                self.send_response(200)
+                self.send_header("Content-type", "application/json")
+                self.end_headers()
+                chain_data = [{"index": b.index, "previous_hash": b.previous_hash, "timestamp": b.timestamp,
+                              "transactions": [{"sender": tx.sender, "receiver": tx.receiver, "amount": tx.amount,
+                                               "timestamp": tx.timestamp, "hash": tx.hash, "signature": tx.signature}
+                                              for tx in b.transactions],
+                              "validator": b.validator, "hash": b.hash} for b in self.blockchain.chain]
+                response = {
+                    "chain": chain_data,
+                    "public_keys": self.blockchain.public_keys,
+                    "balances": self.blockchain.balances,
+                    "current_supply": self.blockchain.current_supply
+                }
+                self.wfile.write(json.dumps(response).encode())
+                logging.info("Successfully sent chain data")
+            except Exception as e:
+                logging.error(f"Error in do_GET: {e}")
+                self.send_response(500)
+                self.send_header("Content-type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps({"error": f"Server error: {str(e)}"}).encode())
         else:
-            return web.json_response({"error": "Block validation failed"}, status=400)
-    except Exception as e:
-        logging.error(f"Error processing block: {e}")
-        return web.json_response({"error": f"Invalid block data: {str(e)}"}, status=400)
+            self.send_response(404)
+            self.end_headers()
 
-def run_async_server(port=5000):
-    app = web.Application()
-    app.add_routes([web.get('/get_chain', handle_get_chain),
-                    web.post('/add_block', handle_add_block)])
-    logging.info(f"Starting async server on port {port}")
-    web.run_app(app, port=port)
+    def do_POST(self):
+        if self.path == "/add_block":
+            content_length = int(self.headers["Content-Length"])
+            post_data = self.rfile.read(content_length)
+            try:
+                block_data = json.loads(post_data.decode())
+                transactions = []
+                for tx in block_data["transactions"]:
+                    transaction = Transaction(tx["sender"], tx["receiver"], tx["amount"], tx["timestamp"])
+                    transaction.hash = tx["hash"]
+                    transaction.signature = tx["signature"]
+                    transactions.append(transaction)
+                new_block = Block(block_data["index"], block_data["previous_hash"],
+                                 block_data["timestamp"], transactions, block_data["validator"])
+                new_block.hash = block_data["hash"]
+                if self.blockchain.add_block(new_block):
+                    self.send_response(200)
+                    self.send_header("Content-type", "application/json")
+                    self.end_headers()
+                    self.wfile.write(json.dumps({"message": "Block added successfully"}).encode())
+                else:
+                    self.send_response(400)
+                    self.send_header("Content-type", "application/json")
+                    self.end_headers()
+                    self.wfile.write(json.dumps({"error": "Block validation failed"}).encode())
+            except Exception as e:
+                print(f"Error processing block: {e}")
+                self.send_response(400)
+                self.send_header("Content-type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps({"error": f"Invalid block data: {str(e)}"}).encode())
+        else:
+            self.send_response(404)
+            self.end_headers()
 
-@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=1, max=10))
-def sync_with_seed(seed_url):
-    logging.info(f"Attempting to sync with {seed_url}/get_chain")
-    response = requests.get(f"{seed_url}/get_chain", timeout=5)
-    response.raise_for_status()
-    data = response.json()
-    new_chain = []
-    for b in data["chain"]:
-        transactions = []
-        for tx in b["transactions"]:
-            transaction = Transaction(tx["sender"], tx["receiver"], tx["amount"], tx["timestamp"])
-            transaction.hash = tx["hash"]
-            transaction.signature = tx["signature"]
-            transactions.append(transaction)
-        block = Block(b["index"], b["previous_hash"], b["timestamp"], transactions, b["validator"])
-        block.hash = b["hash"]
-        new_chain.append(block)
-        logging.info(f"Block created: Index {block.index}, Hash {block.hash}")
-    temp_blockchain = Blockchain()
-    temp_blockchain.chain = new_chain
-    if temp_blockchain.validate_chain():
-        preserved_txs = []
-        for tx in blockchain.pending_transactions:
-            if tx.verify_signature(data.get("public_keys", {})):
-                preserved_txs.append(tx)
-            else:
-                logging.error(f"Transaction validation failed: Invalid signature for {tx.sender} (hash: {tx.hash})")
-        blockchain.chain = new_chain
-        blockchain.public_keys.update(data.get("public_keys", {}))
-        blockchain.balances = {k: float(v) for k, v in data.get("balances", {}).items()}
-        blockchain.current_supply = float(data.get("current_supply", blockchain.current_supply))
-        blockchain.pending_transactions = preserved_txs
-        blockchain.save_data()
-        logging.info(f"Chain synced from {seed_url}, {len(preserved_txs)} pending transactions preserved")
-        return True
-    else:
-        logging.error("Chain validation failed")
-        return False
-
-def get_input(prompt, timeout=30):
+def run_server(port=5000):
     try:
-        return inputimeout(prompt=prompt, timeout=timeout)
-    except TimeoutOccurred:
-        logging.info("Input timeout, returning to menu")
-        return None
+        if 'DYNO' not in os.environ:
+            with open('astralix_server.log', 'a') as f:
+                with redirect_stdout(f):
+                    server = HTTPServer(("", port), BlockchainHandler)
+                    logging.info(f"Listening for blocks on 0.0.0.0:{port}")
+                    server.serve_forever()
+        else:
+            server = HTTPServer(("", port), BlockchainHandler)
+            print(f"Listening for blocks on 0.0.0.0:{port}")
+            server.serve_forever()
+    except Exception as e:
+        logging.error(f"Error starting HTTP server: {e}")
+        print(f"Error starting HTTP server: {e}")
+        raise
+
+def sync_with_seed(seed_url):
+    try:
+        print(f"Attempting to sync with {seed_url}/get_chain")
+        response = requests.get(f"{seed_url}/get_chain", timeout=20)
+        print(f"Received response with status code: {response.status_code}")
+        if response.status_code == 200:
+            data = response.json()
+            new_chain = []
+            for b in data["chain"]:
+                transactions = []
+                for tx in b["transactions"]:
+                    transaction = Transaction(tx["sender"], tx["receiver"], tx["amount"], tx["timestamp"])
+                    transaction.hash = tx["hash"]
+                    transaction.signature = tx["signature"]
+                    transactions.append(transaction)
+                block = Block(b["index"], b["previous_hash"], b["timestamp"], transactions, b["validator"])
+                block.hash = b["hash"]
+                new_chain.append(block)
+                print(f"Block created: Index {block.index}, Hash {block.hash}")
+            temp_blockchain = Blockchain()
+            temp_blockchain.chain = new_chain
+            if temp_blockchain.validate_chain():
+                print("Chain validation passed")
+                preserved_txs = []
+                for tx in blockchain.pending_transactions:
+                    if tx.verify_signature(data.get("public_keys", {})):
+                        preserved_txs.append(tx)
+                    else:
+                        print(f"Transaction validation failed: Invalid signature for {tx.sender} (hash: {tx.hash})")
+                blockchain.chain = new_chain
+                blockchain.public_keys.update(data.get("public_keys", {}))
+                blockchain.balances = {k: float(v) for k, v in data.get("balances", {}).items()}
+                blockchain.current_supply = float(data.get("current_supply", blockchain.current_supply))
+                blockchain.pending_transactions = preserved_txs
+                blockchain.save_data()
+                print(f"Chain synced from {seed_url}, {len(preserved_txs)} pending transactions preserved")
+                return True
+            else:
+                print("Chain validation failed")
+        else:
+            print(f"Failed to sync: HTTP {response.status_code}, Response: {response.text}")
+    except Exception as e:
+        print(f"Sync error: {e}")
+    print("Sync failed, keeping local chain")
+    return False
 
 def main():
     global blockchain
     blockchain = Blockchain()
     if 'DYNO' in os.environ:
-        logging.info("Running on Heroku, starting server")
-        run_async_server(port=int(os.getenv("PORT", 5000)))
+        try:
+            run_server(port=int(os.getenv("PORT", 5000)))
+        except Exception as e:
+            print(f"Error starting HTTP server on Heroku: {e}")
+            raise
     else:
-        logging.info("Starting async server in Termux")
-        threading.Thread(target=run_async_server, daemon=True).start()
+        threading.Thread(target=run_server, daemon=True).start()
         while True:
-            logging.info("Displaying menu")
             print("\n=== AstraliX Blockchain Interface ===")
             print("1. Generate new key pair and address")
             print("2. Register public key (manual)")
@@ -336,10 +395,7 @@ def main():
             print("6. Mine block (process pending transactions)")
             print("7. Sync with seed node")
             print("8. Exit")
-            choice = get_input("Enter your choice (1-8): ")
-            if choice is None:
-                continue
-            choice = choice.strip()
+            choice = input("Enter your choice (1-8): ").strip()
 
             if choice == "1":
                 sk = ecdsa.SigningKey.generate(curve=ecdsa.SECP256k1)
@@ -354,34 +410,24 @@ def main():
                 print("Save these securely! The address is your wallet identifier.")
 
             elif choice == "2":
-                address = get_input("Enter address: ")
-                if address is None:
-                    continue
-                public_key = get_input("Enter public key: ")
-                if public_key is None:
-                    continue
+                address = input("Enter address: ").strip()
+                public_key = input("Enter public key: ").strip()
                 blockchain.public_keys[address] = public_key
                 blockchain.save_data()
                 print(f"Registered public key for {address}")
 
             elif choice == "3":
-                sender = get_input("Enter sender address: ")
-                if sender is None:
-                    continue
+                sender = input("Enter sender address: ").strip()
                 if sender != "genesis_miner" and sender not in blockchain.public_keys:
                     print(f"Error: No public key registered for {sender}")
                     continue
-                receiver = get_input("Enter receiver address: ")
-                if receiver is None:
-                    continue
+                receiver = input("Enter receiver address: ").strip()
                 try:
-                    amount = float(get_input("Enter amount to send: "))
+                    amount = float(input("Enter amount to send: ").strip())
                     if amount <= 0:
                         print("Amount must be positive")
                         continue
-                    private_key = get_input("Enter sender's private key: ")
-                    if private_key is None:
-                        continue
+                    private_key = input("Enter sender's private key: ").strip()
                     existing_tx = next((tx for tx in blockchain.pending_transactions
                                        if tx.sender == sender and tx.receiver == receiver
                                        and tx.amount == amount), None)
@@ -401,9 +447,7 @@ def main():
                     print("Invalid amount")
 
             elif choice == "4":
-                address = get_input("Enter address to check balance: ")
-                if address is None:
-                    continue
+                address = input("Enter address to check balance: ").strip()
                 balance = blockchain.balances.get(address, 0)
                 print(f"Balance for {address}: {balance} ALX")
 
@@ -430,14 +474,14 @@ def main():
                                                                        "hash": tx.hash, "signature": tx.signature}
                                                                       for tx in block.transactions],
                                                       "validator": block.validator, "hash": block.hash},
-                                                timeout=5)
-                        logging.info(f"Sending block {block.index} to Heroku")
+                                                timeout=20)
+                        print(f"Sending block {block.index} to https://astralix-87c3a03ccde8.herokuapp.com/add_block")
                         if response.status_code == 200:
                             print("Block sent successfully to seed node")
                         else:
-                            logging.error(f"Failed to send block: HTTP {response.status_code}")
+                            print(f"Failed to send block: HTTP {response.status_code}, Response: {response.text}")
                     except Exception as e:
-                        logging.error(f"Failed to send block: {e}")
+                        print(f"Failed to send block: {e}")
 
             elif choice == "7":
                 if sync_with_seed("https://astralix-87c3a03ccde8.herokuapp.com"):
